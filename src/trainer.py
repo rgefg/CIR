@@ -6,6 +6,7 @@ import os
 import time
 import re
 import random
+from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -38,151 +39,6 @@ RISK_TOKEN_SET = None
 
 def _tokenize_simple(text):
     return re.findall(r"[A-Za-z0-9]+", str(text).lower())
-
-
-def _to_text(x):
-    if x is None:
-        return ""
-    if isinstance(x, str):
-        return x
-    if isinstance(x, dict):
-        for k in ["text", "value", "en", "caption", "modified_caption", "instruction", "reverse_instruction"]:
-            if k in x and isinstance(x[k], str):
-                return x[k]
-        return ""
-    if isinstance(x, (list, tuple)):
-        for v in x:
-            if isinstance(v, str):
-                return v
-        for v in x:
-            if isinstance(v, dict):
-                vv = _to_text(v)
-                if vv:
-                    return vv
-        return ""
-    return str(x)
-
-
-def _short_preview_text(text, limit=160):
-    text = re.sub(r"\s+", " ", _to_text(text)).strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
-
-
-def build_reasoning_latent(z_src, z_tgt, z_fwd):
-    """
-    Encode the state transition A -> B into a compact latent that keeps both
-    the target delta and the instruction-aligned direction.
-    """
-    delta_fwd = F.normalize(z_tgt - z_src, dim=-1)
-    z_reason = F.normalize(delta_fwd + z_fwd, dim=-1)
-    return z_reason, delta_fwd
-
-
-def get_reason_llm_target_loss(reasoning_modules, z_reason, src_texts, instructions, target_texts, args):
-    projector = reasoning_modules["projector"]
-    llm = reasoning_modules["llm"]
-    tokenizer_llm = reasoning_modules["tokenizer"]
-
-    prompt_template = getattr(
-        args,
-        "reason_llm_template",
-        "Source caption: {src}\nInstruction: {instruction}\nTarget caption:",
-    )
-    prompts = [
-        prompt_template.format(src=_to_text(src), instruction=_to_text(inst))
-        for src, inst in zip(src_texts, instructions)
-    ]
-    targets = [_to_text(tgt).strip() for tgt in target_texts]
-
-    soft_prompts = projector(z_reason)
-    embed_layer = llm.get_input_embeddings()
-    embed_device = embed_layer.weight.device
-    embed_dtype = embed_layer.weight.dtype
-    soft_prompts = soft_prompts.to(device=embed_device, dtype=embed_dtype)
-
-    prompt_ids = tokenizer_llm(
-        prompts,
-        add_special_tokens=True,
-        truncation=True,
-        max_length=int(getattr(args, "reason_llm_max_prompt_len", 128)),
-        return_attention_mask=False,
-    )["input_ids"]
-    target_ids = tokenizer_llm(
-        targets,
-        add_special_tokens=False,
-        truncation=True,
-        max_length=int(getattr(args, "reason_llm_max_target_len", 48)),
-        return_attention_mask=False,
-    )["input_ids"]
-
-    eos_id = tokenizer_llm.eos_token_id
-    if eos_id is None:
-        eos_id = tokenizer_llm.pad_token_id
-    if eos_id is None:
-        raise ValueError("Frozen LLM tokenizer needs either eos_token_id or pad_token_id.")
-
-    combined_embeds = []
-    combined_labels = []
-    combined_masks = []
-    effective_target_ids = []
-    for idx, (prompt_seq, target_seq) in enumerate(zip(prompt_ids, target_ids)):
-        if len(target_seq) == 0:
-            target_seq = [eos_id]
-        effective_target_ids.append(target_seq)
-        prompt_tensor = torch.tensor(prompt_seq, dtype=torch.long, device=embed_device)
-        target_tensor = torch.tensor(target_seq, dtype=torch.long, device=embed_device)
-        prompt_embeds = embed_layer(prompt_tensor)
-        target_embeds = embed_layer(target_tensor)
-        soft = soft_prompts[idx]
-        merged = torch.cat([soft, prompt_embeds, target_embeds], dim=0)
-        labels = torch.full((merged.size(0),), -100, dtype=torch.long, device=embed_device)
-        labels[soft.size(0) + prompt_tensor.size(0):] = target_tensor
-        mask = torch.ones((merged.size(0),), dtype=torch.long, device=embed_device)
-        combined_embeds.append(merged)
-        combined_labels.append(labels)
-        combined_masks.append(mask)
-
-    max_len = max(x.size(0) for x in combined_embeds)
-    hidden = combined_embeds[0].size(-1)
-    batch_size = len(combined_embeds)
-    batch_embeds = torch.zeros((batch_size, max_len, hidden), dtype=embed_dtype, device=embed_device)
-    batch_labels = torch.full((batch_size, max_len), -100, dtype=torch.long, device=embed_device)
-    batch_masks = torch.zeros((batch_size, max_len), dtype=torch.long, device=embed_device)
-
-    for idx, (embeds, labels, mask) in enumerate(zip(combined_embeds, combined_labels, combined_masks)):
-        cur_len = embeds.size(0)
-        batch_embeds[idx, :cur_len] = embeds
-        batch_labels[idx, :cur_len] = labels
-        batch_masks[idx, :cur_len] = mask
-
-    outputs = llm(
-        inputs_embeds=batch_embeds,
-        attention_mask=batch_masks,
-        labels=batch_labels,
-        use_cache=False,
-    )
-    stats = {
-        "loss_reason_llm": float(outputs.loss.detach().item()),
-        "z_reason_norm": float(torch.norm(z_reason, dim=-1).mean().detach().item()),
-        "soft_prompt_norm": float(torch.norm(soft_prompts, dim=-1).mean().detach().item()),
-    }
-    if int(getattr(args, "reason_llm_preview_every", 0)) > 0 and batch_size > 0:
-        preview_idx = 0
-        preview_target_ids = effective_target_ids[preview_idx]
-        preview_start = soft_prompts.size(1) + len(prompt_ids[preview_idx])
-        pred_start = max(preview_start - 1, 0)
-        pred_end = pred_start + len(preview_target_ids)
-        pred_slice = outputs.logits[preview_idx, pred_start:pred_end]
-        pred_ids = pred_slice.argmax(dim=-1).detach().cpu().tolist() if pred_slice.numel() > 0 else []
-        stats["reason_preview_src"] = _short_preview_text(src_texts[preview_idx])
-        stats["reason_preview_instruction"] = _short_preview_text(instructions[preview_idx])
-        stats["reason_preview_target"] = _short_preview_text(targets[preview_idx])
-        stats["reason_preview_pred"] = _short_preview_text(
-            tokenizer_llm.decode(pred_ids, skip_special_tokens=True)
-        )
-    return outputs.loss, stats
 
 
 def _load_or_build_risk_tokens(args):
@@ -264,6 +120,33 @@ def _is_high_risk_token(token, risk_set):
     if core in risk_set:
         return True
     return False
+
+
+def _safe_l2_normalize(x, dim=-1, eps=1e-6):
+    return x / x.norm(dim=dim, keepdim=True).clamp_min(eps)
+
+
+def _to_text(x):
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        for k in ["text", "value", "en", "caption", "modified_caption", "instruction", "reverse_instruction"]:
+            if k in x and isinstance(x[k], str):
+                return x[k]
+        return ""
+    if isinstance(x, (list, tuple)):
+        for v in x:
+            if isinstance(v, str):
+                return v
+        for v in x:
+            if isinstance(v, dict):
+                vv = _to_text(v)
+                if vv:
+                    return vv
+        return ""
+    return str(x)
 
 
 def get_loss(model, images, texts, loss_img, loss_txt, args, data_identifier=-1):
@@ -555,47 +438,44 @@ def get_loss_lcom_cc3m(model, img2text, ref_images, instructions, modified_capti
     cap_features = model.encode_text(cap_tokens)
     cap_features = cap_features / cap_features.norm(dim=-1, keepdim=True)
 
+    # ============================================================
+    # 🔒 Logit Scale 检查与限制
+    # ============================================================
+    # CLIP标准做法：clamp logit_scale 到最大值 100 (log(100) ≈ 4.605)
+    # 如果logit_scale太大，会导致模型过度自信，loss异常低
     logit_scale_raw = model.logit_scale.exp()
     # Clamp to max 100 (standard CLIP practice)
     logit_scale = torch.clamp(logit_scale_raw, max=100.0).mean()
+    # ============================================================
 
-    # gather across GPUs to enlarge negatives (supports heterogeneous batch sizes)
+    # gather across GPUs to enlarge negatives
     if args.distributed and args.aggregate:
         world_size = dist.get_world_size()
         rank = dist.get_rank()
 
-        local_bs = torch.tensor([query_features.size(0)], device=device, dtype=torch.long)
-        all_bs = [torch.zeros(1, device=device, dtype=torch.long) for _ in range(world_size)]
-        dist.all_gather(all_bs, local_bs)
-        max_bs = max(int(s.item()) for s in all_bs)
+        gathered_q = [torch.zeros_like(query_features) for _ in range(world_size)]
+        gathered_c = [torch.zeros_like(cap_features) for _ in range(world_size)]
+        dist.all_gather(gathered_q, query_features)
+        dist.all_gather(gathered_c, cap_features)
 
-        embed_dim = query_features.size(1)
-        q_padded = F.pad(query_features, (0, 0, 0, max_bs - query_features.size(0)))
-        c_padded = F.pad(cap_features, (0, 0, 0, max_bs - cap_features.size(0)))
-
-        gathered_q = [torch.zeros(max_bs, embed_dim, device=device, dtype=query_features.dtype) for _ in range(world_size)]
-        gathered_c = [torch.zeros(max_bs, embed_dim, device=device, dtype=cap_features.dtype) for _ in range(world_size)]
-        dist.all_gather(gathered_q, q_padded)
-        dist.all_gather(gathered_c, c_padded)
-
-        real_q = [gathered_q[i][:int(all_bs[i].item())] for i in range(world_size)]
-        real_c = [gathered_c[i][:int(all_bs[i].item())] for i in range(world_size)]
-
-        all_q = torch.cat([query_features] + [real_q[i] for i in range(world_size) if i != rank])
-        all_c = torch.cat([cap_features] + [real_c[i] for i in range(world_size) if i != rank])
+        all_q = torch.cat([query_features] + gathered_q[:rank] + gathered_q[rank + 1 :])
+        all_c = torch.cat([cap_features] + gathered_c[:rank] + gathered_c[rank + 1 :])
     else:
         all_q, all_c = query_features, cap_features
 
     logits_per_query = logit_scale * (all_q @ all_c.t())
-    logits_per_caption = logits_per_query.t()
+    logits_per_caption = logits_per_query.t() 
 
+    # 生成标签 (对角线为正样本)
     targets = torch.arange(all_q.size(0), device=all_q.device, dtype=torch.long)
-
-    loss_q2c = loss_fn(logits_per_query, targets)
-    loss_c2q = loss_fn(logits_per_caption, targets)
-
+    
+    # 计算双向 Loss
+    loss_q2c = loss_fn(logits_per_query, targets) # Query 找 Caption
+    loss_c2q = loss_fn(logits_per_caption, targets) # Caption 找 Query
+    
     loss = (loss_q2c + loss_c2q) / 2
-
+    # --- 修改结束 ---
+    
     stats = {
         "loss_q2c": float(loss_q2c.detach().item()),
         "loss_c2q": float(loss_c2q.detach().item()),
@@ -603,124 +483,167 @@ def get_loss_lcom_cc3m(model, img2text, ref_images, instructions, modified_capti
     return loss, stats
 
 
-def get_loss_joint_cc3m(
-    model,
-    img2text,
-    ref_images,
+def get_loss_geo_text_branch(
+    text_model,
     src_captions,
     modified_captions,
     forward_instructions,
     reverse_instructions,
-    loss_fn,
     args,
-    reasoning_modules=None,
 ):
-    """
-    Joint training: retrieval (Lcom) as primary loss + frozen-LLM reasoning as auxiliary.
+    device = next(text_model.parameters()).device
 
-    Retrieval path (same as get_loss_lcom_cc3m):
-      query = compose(image, instruction) via placeholder injection
-      target = encode_text(modified_caption)
-      loss_retrieval = contrastive(query, target)
+    csrc = [_to_text(x) for x in src_captions]
+    ctgt = [_to_text(x) for x in modified_captions]
+    fwd = [_to_text(x) for x in forward_instructions] if forward_instructions else [""] * len(ctgt)
+    rev = [_to_text(x) for x in reverse_instructions] if reverse_instructions else [""] * len(ctgt)
 
-    Reasoning path:
-      z_src = Text(C_src), z_tgt = Text(C_tgt), z_fwd = Text(T_fwd)
-      z_reason = normalize(delta_fwd + z_fwd)
-      z_reason -> projector -> frozen LLM -> CE loss on target caption
-    """
-    device = ref_images.device
-    world_size = dist.get_world_size() if (args.distributed and dist.is_initialized()) else 1
-    local_batch_size = int(ref_images.shape[0])
-    actual_per_microbatch = int(
-        getattr(args, "actual_samples_per_microbatch", local_batch_size * world_size)
-    )
-    # DDP averages gradients across ranks, so unequal local batch sizes need
-    # an explicit rescale to recover a global sample-weighted mean loss.
-    ddp_batch_scale = (world_size * local_batch_size) / float(max(actual_per_microbatch, 1))
+    has_src = torch.tensor([bool(x.strip()) for x in csrc], device=device, dtype=torch.bool)
+    has_tgt = torch.tensor([bool(x.strip()) for x in ctgt], device=device, dtype=torch.bool)
+    has_fwd = torch.tensor([bool(x.strip()) for x in fwd], device=device, dtype=torch.bool)
+    has_rev = torch.tensor([bool(x.strip()) for x in rev], device=device, dtype=torch.bool)
+    valid_mask = has_src & has_tgt & has_fwd & has_rev
 
-    # ================================================================
-    # Part 1: Retrieval loss (Lcom) — primary objective
-    # ================================================================
-    retrieval_loss, retrieval_stats = get_loss_lcom_cc3m(
-        model, img2text, ref_images, forward_instructions, modified_captions, loss_fn, args,
-    )
+    embed_norm_eps = float(getattr(args, "geo_embed_norm_eps", 1e-6))
+    delta_norm_eps = float(getattr(args, "geo_delta_norm_eps", 1e-4))
+    delta_min_norm = float(getattr(args, "geo_delta_min_norm", 1e-3))
 
-    retrieval_loss_scaled = retrieval_loss * ddp_batch_scale
-    global_retrieval_loss_scaled = retrieval_loss_scaled.detach()
-    if args.distributed and dist.is_initialized():
-        global_retrieval_loss_scaled = global_retrieval_loss_scaled.clone()
-        dist.all_reduce(global_retrieval_loss_scaled, op=dist.ReduceOp.SUM)
-        global_retrieval_loss_scaled /= float(world_size)
-    loss = retrieval_loss_scaled
+    csrc_tokens = tokenize(csrc, truncate=True).to(device, non_blocking=True)
+    ctgt_tokens = tokenize(ctgt, truncate=True).to(device, non_blocking=True)
+    fwd_tokens = tokenize(fwd, truncate=True).to(device, non_blocking=True)
+    rev_tokens = tokenize(rev, truncate=True).to(device, non_blocking=True)
+
+    z_src = _safe_l2_normalize(text_model.encode_text(csrc_tokens), dim=-1, eps=embed_norm_eps)
+    z_tgt = _safe_l2_normalize(text_model.encode_text(ctgt_tokens), dim=-1, eps=embed_norm_eps)
+    z_fwd = _safe_l2_normalize(text_model.encode_text(fwd_tokens), dim=-1, eps=embed_norm_eps)
+    z_rev = _safe_l2_normalize(text_model.encode_text(rev_tokens), dim=-1, eps=embed_norm_eps)
+
+    delta_raw = z_tgt - z_src
+    delta_raw_norm = delta_raw.norm(dim=-1)
+    delta_valid = delta_raw_norm > delta_min_norm
+    valid_mask = valid_mask & delta_valid
+
+    delta_fwd = delta_raw / delta_raw_norm.unsqueeze(-1).clamp_min(delta_norm_eps)
+    delta_rev = -delta_fwd
+
+    fwd_align = (z_fwd * delta_fwd).sum(dim=-1)
+    rev_align = (z_rev * delta_rev).sum(dim=-1)
+    fwd_rev_cos = (z_fwd * z_rev).sum(dim=-1)
+
+    valid_count = int(valid_mask.sum().item())
+    reverse_weight = float(getattr(args, "geo_reverse_weight", 0.25))
+    reverse_margin = float(getattr(args, "geo_reverse_margin", 0.0))
+
+    if valid_count > 0:
+        valid_fwd_align = fwd_align[valid_mask]
+        valid_rev_align = rev_align[valid_mask]
+        valid_fwd_rev_cos = fwd_rev_cos[valid_mask]
+
+        loss_fwd = (1.0 - valid_fwd_align).mean()
+        loss_rev = (1.0 - valid_rev_align).mean()
+        loss_reverse = F.relu(valid_fwd_rev_cos + reverse_margin).mean()
+        geom_loss = loss_fwd + loss_rev + (reverse_weight * loss_reverse)
+
+        mean_fwd_align = float(valid_fwd_align.mean().detach().item())
+        mean_rev_align = float(valid_rev_align.mean().detach().item())
+        mean_fwd_rev_cos = float(valid_fwd_rev_cos.mean().detach().item())
+    else:
+        geom_loss = (z_src.sum() + z_tgt.sum() + z_fwd.sum() + z_rev.sum()) * 0.0
+        loss_fwd = geom_loss.detach()
+        loss_rev = geom_loss.detach()
+        loss_reverse = geom_loss.detach()
+        mean_fwd_align = 0.0
+        mean_rev_align = 0.0
+        mean_fwd_rev_cos = 0.0
+
+    valid_ratio = float(valid_mask.float().mean().detach().item()) if len(ctgt) > 0 else 0.0
+    missing_src_ratio = float((~has_src).float().mean().detach().item()) if len(ctgt) > 0 else 0.0
+    small_delta_ratio = float((~delta_valid).float().mean().detach().item()) if len(ctgt) > 0 else 0.0
+    delta_norm_mean = float(delta_raw_norm.mean().detach().item()) if len(ctgt) > 0 else 0.0
+
     stats = {
-        "loss_retrieval": float(retrieval_loss.detach().item()),
-        "loss_retrieval_scaled": float(retrieval_loss_scaled.detach().item()),
-        "loss_retrieval_global_scaled": float(global_retrieval_loss_scaled.detach().item()),
-        "loss_q2c": retrieval_stats.get("loss_q2c", 0.0),
-        "loss_c2q": retrieval_stats.get("loss_c2q", 0.0),
-        "ddp_batch_scale": ddp_batch_scale,
-        "local_batch_size": local_batch_size,
-        "actual_samples_per_microbatch": actual_per_microbatch,
+        "loss_fwd": float(loss_fwd.detach().item()),
+        "loss_rev": float(loss_rev.detach().item()),
+        "loss_reverse_consistency": float(loss_reverse.detach().item()),
+        "loss_geom_total": float(geom_loss.detach().item()),
+        "z_fwd_align": mean_fwd_align,
+        "z_rev_align": mean_rev_align,
+        "z_fwd_rev_cos": mean_fwd_rev_cos,
+        "geo_valid_ratio": valid_ratio,
+        "geo_valid_count": valid_count,
+        "geo_missing_src_ratio": missing_src_ratio,
+        "geo_small_delta_ratio": small_delta_ratio,
+        "geo_delta_norm_mean": delta_norm_mean,
+    }
+    return geom_loss, stats
+
+
+def _normalized_lora_name(name):
+    if name.startswith("module."):
+        name = name[len("module."):]
+    return name
+
+
+def project_geo_gradients(retrieval_model, geo_text_model):
+    retrieval_grads = {}
+    for name, param in retrieval_model.named_parameters():
+        norm_name = _normalized_lora_name(name)
+        if norm_name.startswith("visual."):
+            continue
+        if not (norm_name.endswith(".A") or norm_name.endswith(".B")):
+            continue
+        if param.grad is None:
+            continue
+        retrieval_grads[norm_name] = param.grad.detach()
+
+    matched = 0
+    conflicts = 0
+    projected = 0
+    negative_dot_sum = 0.0
+    for name, param in geo_text_model.named_parameters():
+        norm_name = _normalized_lora_name(name)
+        if not (norm_name.endswith(".A") or norm_name.endswith(".B")):
+            continue
+        if param.grad is None:
+            continue
+        retr_grad = retrieval_grads.get(norm_name)
+        if retr_grad is None:
+            continue
+
+        geo_grad = param.grad
+        matched += 1
+        geo_flat = geo_grad.reshape(-1).float()
+        retr_flat = retr_grad.reshape(-1).float()
+        dot_val = torch.dot(geo_flat, retr_flat)
+        if dot_val < 0:
+            conflicts += 1
+            negative_dot_sum += float(dot_val.detach().item())
+            retr_norm_sq = torch.dot(retr_flat, retr_flat)
+            if retr_norm_sq > 1e-12:
+                scale = (dot_val / retr_norm_sq).to(dtype=geo_grad.dtype)
+                geo_grad.sub_(scale * retr_grad)
+                projected += 1
+
+    ratio = float(conflicts) / float(matched) if matched > 0 else 0.0
+    return {
+        "geo_grad_pairs": matched,
+        "geo_conflict_count": conflicts,
+        "geo_projected_count": projected,
+        "geo_conflict_ratio": ratio,
+        "geo_negative_dot_sum": negative_dot_sum,
     }
 
-    # ================================================================
-    # Part 2: Frozen-LLM reasoning loss — auxiliary objective
-    #   LLM lives only on rank 0.  Rank 0 computes LLM loss on its
-    #   local batch only. Use the same batch-aware DDP correction so
-    #   its gradient stays proportional to the number of local samples.
-    # ================================================================
-    reason_llm_divisor = float(getattr(args, "reason_llm_weight", 0.0))
-    if reasoning_modules is not None and reason_llm_divisor > 0.0:
-        csrc = [_to_text(x) for x in src_captions]
-        ctgt = [_to_text(x) for x in modified_captions]
-        fwd = [_to_text(x) for x in forward_instructions] if forward_instructions else [""] * len(ctgt)
 
-        csrc_tokens = tokenize(csrc, truncate=True).to(device, non_blocking=True)
-        ctgt_tokens = tokenize(ctgt, truncate=True).to(device, non_blocking=True)
-        fwd_tokens = tokenize(fwd, truncate=True).to(device, non_blocking=True)
-
-        z_src = F.normalize(model.encode_text(csrc_tokens), dim=-1)
-        z_tgt = F.normalize(model.encode_text(ctgt_tokens), dim=-1)
-        z_fwd = F.normalize(model.encode_text(fwd_tokens), dim=-1)
-        z_reason, delta_fwd = build_reasoning_latent(z_src, z_tgt, z_fwd)
-
-        reason_loss, reason_stats = get_reason_llm_target_loss(
-            reasoning_modules, z_reason, csrc, fwd, ctgt, args,
-        )
-        reason_loss_scaled = reason_loss * ddp_batch_scale
-        # LLM loss exists on rank 0 only, so multiply by world_size here to
-        # compensate DDP's gradient averaging and realize a true global 1/n ratio.
-        target_reason_contrib = (
-            global_retrieval_loss_scaled * (float(world_size) / reason_llm_divisor)
-        )
-        reason_llm_coeff = target_reason_contrib / reason_loss_scaled.detach().clamp_min(1e-12)
-        reason_contrib = reason_llm_coeff * reason_loss_scaled
-        loss = loss + reason_contrib
-
-        stats["loss_reason_llm"] = float(reason_loss.detach().item())
-        stats["loss_reason_llm_scaled"] = float(reason_loss_scaled.detach().item())
-        stats["reason_llm_divisor"] = reason_llm_divisor
-        stats["reason_llm_coeff"] = float(reason_llm_coeff.detach().item())
-        stats["reason_llm_target_contrib"] = float(target_reason_contrib.detach().item())
-        stats["reason_llm_effective_contrib"] = float(reason_contrib.detach().item())
-        stats["z_reason_align"] = float((z_reason * delta_fwd).sum(dim=-1).mean().detach().item())
-        stats.update({k: v for k, v in reason_stats.items() if k not in stats})
-
-    # ================================================================
-    # (Deprecated) Geometric losses — ablation showed no additional gain
-    #   after merge; kept commented for reference.
-    # ----------------------------------------------------------------
-    # rev = [_to_text(x) for x in reverse_instructions]
-    # rev_tokens = tokenize(rev, truncate=True).to(device, non_blocking=True)
-    # z_rev = F.normalize(model.encode_text(rev_tokens), dim=-1)
-    # delta_rev = F.normalize(z_src - z_tgt, dim=-1)
-    # loss_fwd = 1.0 - (z_fwd * delta_fwd).sum(dim=-1).mean()
-    # loss_rev = 1.0 - (z_rev * delta_rev).sum(dim=-1).mean()
-    # loss_zero = torch.norm(z_fwd + z_rev, dim=-1).mean()
-    # geom_loss = loss_fwd + loss_rev + loss_zero
-    # ================================================================
-
-    return loss, stats
+def _geo_rng_context(args, enabled):
+    if not enabled:
+        return nullcontext()
+    cuda_devices = []
+    if torch.cuda.is_available():
+        if getattr(args, "gpu", None) is not None:
+            cuda_devices = [int(args.gpu)]
+        else:
+            cuda_devices = [torch.cuda.current_device()]
+    return torch.random.fork_rng(devices=cuda_devices, enabled=True)
 
 
 def train(
@@ -729,26 +652,22 @@ def train(
     data,
     epoch,
     optimizer,
-    scaler,
+    retrieval_scaler,
     scheduler,
     args,
     tb_writer=None,
-    save_at_percentages=None,
-    reasoning_modules=None,
+    geo_text_model=None,
+    geo_optimizer=None,
+    geo_scheduler=None,
+    geo_scaler=None,
 ):
     os.environ["WDS_EPOCH"] = str(epoch)
 
     # IMPORTANT: train mode so LoRA can learn (and dropout consistent)
     model.train()
     img2text.train()
-    if reasoning_modules is not None:
-        reasoning_modules["projector"].train()
-        reasoning_modules["llm"].eval()
-
-    # Reset saved percentages and clamp counter for this epoch
-    if save_at_percentages is not None:
-        train._saved_percentages = set()
-    train.clamp_hit_count = 0
+    if geo_text_model is not None:
+        geo_text_model.train()
 
     dataloader, sampler = data["train"].dataloader, data["train"].sampler
     loss_ce = nn.CrossEntropyLoss()
@@ -757,6 +676,11 @@ def train(
 
     if args.distributed and sampler is not None:
         sampler.set_epoch(epoch)
+
+    if args.precision == "amp" and retrieval_scaler is None:
+        raise ValueError("AMP training requires a retrieval GradScaler.")
+    if args.precision == "amp" and geo_optimizer is not None and geo_scaler is None:
+        raise ValueError("AMP geo training requires a dedicated geo GradScaler.")
 
     # handle streaming dataset (num_batches=None)
     num_batches_per_epoch = getattr(dataloader, "num_batches", None)
@@ -769,6 +693,8 @@ def train(
     num_microbatches = num_updates_per_epoch * accum_steps
 
     optimizer.zero_grad(set_to_none=True)
+    if geo_optimizer is not None:
+        geo_optimizer.zero_grad(set_to_none=True)
 
     # Create iterator once; re-creating iter(dataloader) repeatedly is very expensive (and can stall).
     dl_it = iter(dataloader)
@@ -788,17 +714,19 @@ def train(
             batch = next(dl_it)
 
         data_time = time.time() - end
-        m = model.module if hasattr(model, "module") else model
-        i2t = img2text.module if hasattr(img2text, "module") else img2text
+        m = model.module if args.distributed or args.dp else model
+        i2t = img2text.module if (args.distributed or args.dp) else img2text
+        g = geo_text_model.module if hasattr(geo_text_model, "module") else geo_text_model
         loss_stats = None
 
         # ---- CC3M CIR dict batch -> Lcom-only ----
         if isinstance(batch, dict):
             images = batch["ref_img"]
+            instructions = batch["instruction"]
             modified_captions = batch["modified_caption"]
-            instructions = batch.get("instruction", None)
-            reverse_instructions = batch.get("reverse_instruction", None)
-            src_captions = batch.get("src_caption", None)
+            src_captions = batch.get("src_caption", [""] * len(modified_captions))
+            reverse_instructions = batch.get("reverse_instruction", [""] * len(modified_captions))
+            geo_forward_instructions = list(instructions)
 
             # ============================================================
             # 🔒 Instruction Token Dropout: drop high-risk tokens only
@@ -806,7 +734,7 @@ def train(
             instruction_dropout_prob = getattr(args, "instruction_dropout_prob", 0.0)
             num_dropped = 0
             num_eligible = 0
-            if (not getattr(args, "train_inference_lora", False)) and instruction_dropout_prob > 0.0 and model.training:
+            if instruction_dropout_prob > 0.0 and model.training:
                 risk_set = _load_or_build_risk_tokens(args)
                 dropped_instructions = []
                 for inst in instructions:
@@ -827,55 +755,12 @@ def train(
             if args.gpu is not None:
                 images = images.cuda(args.gpu, non_blocking=True)
 
-            if getattr(args, "train_inference_lora", False):
-                if src_captions is None:
-                    src_captions = [""] * len(modified_captions)
-                if not hasattr(train, "_checked_joint_fields"):
-                    def _is_empty(x):
-                        return (x is None) or (str(x).strip() == "")
-                    empty_src = sum(1 for x in src_captions if _is_empty(x))
-                    bsz = max(1, len(modified_captions))
-                    if is_master(args):
-                        logging.info(
-                            f"[joint] empty src_caption: {empty_src}/{bsz} ({100.0*empty_src/bsz:.1f}%)"
-                        )
-                    train._checked_joint_fields = True
-                if args.precision == "amp":
-                    with autocast():
-                        total_loss, loss_stats = get_loss_joint_cc3m(
-                            m, i2t, images,
-                            src_captions, modified_captions,
-                            instructions, reverse_instructions,
-                            loss_ce, args,
-                            reasoning_modules=reasoning_modules,
-                        )
-                        total_loss = total_loss / float(accum_steps)
-                    scaler.scale(total_loss).backward()
-                else:
-                    total_loss, loss_stats = get_loss_joint_cc3m(
-                        m, i2t, images,
-                        src_captions, modified_captions,
-                        instructions, reverse_instructions,
-                        loss_ce, args,
-                        reasoning_modules=reasoning_modules,
-                    )
-                    (total_loss / float(accum_steps)).backward()
-            else:
-                if args.precision == "amp":
-                    with autocast():
-                        total_loss, loss_stats = get_loss_lcom_cc3m(
-                            m,
-                            i2t,
-                            images,
-                            instructions,
-                            modified_captions,
-                            loss_ce,
-                            args,
-                        )
-                        total_loss = total_loss / float(accum_steps)
-                    scaler.scale(total_loss).backward()
-                else:
-                    total_loss, loss_stats = get_loss_lcom_cc3m(
+            geo_weight = float(getattr(args, "geo_weight", 0.0))
+            geo_enabled = (g is not None) and (geo_weight > 0.0)
+
+            if args.precision == "amp":
+                with autocast():
+                    retrieval_loss, retrieval_stats = get_loss_lcom_cc3m(
                         m,
                         i2t,
                         images,
@@ -884,12 +769,72 @@ def train(
                         loss_ce,
                         args,
                     )
-                    (total_loss / float(accum_steps)).backward()
+                    total_loss = retrieval_loss / float(accum_steps)
+                retrieval_scaler.scale(total_loss).backward()
+                if geo_enabled:
+                    with _geo_rng_context(args, enabled=True):
+                        with autocast():
+                            geo_loss, geo_stats = get_loss_geo_text_branch(
+                                g,
+                                src_captions,
+                                modified_captions,
+                                geo_forward_instructions,
+                                reverse_instructions,
+                                args,
+                            )
+                            weighted_geo_loss = geo_loss * geo_weight
+                        if torch.isfinite(weighted_geo_loss.detach()).all():
+                            geo_scaler.scale(weighted_geo_loss / float(accum_steps)).backward()
+                        else:
+                            if geo_stats is None:
+                                geo_stats = {}
+                            geo_stats["geo_skipped_nonfinite"] = 1.0
+                            weighted_geo_loss = None
+                else:
+                    geo_loss, geo_stats, weighted_geo_loss = None, None, None
+            else:
+                retrieval_loss, retrieval_stats = get_loss_lcom_cc3m(
+                    m,
+                    i2t,
+                    images,
+                    instructions,
+                    modified_captions,
+                    loss_ce,
+                    args,
+                )
+                (retrieval_loss / float(accum_steps)).backward()
+                if geo_enabled:
+                    with _geo_rng_context(args, enabled=True):
+                        geo_loss, geo_stats = get_loss_geo_text_branch(
+                            g,
+                            src_captions,
+                            modified_captions,
+                            geo_forward_instructions,
+                            reverse_instructions,
+                            args,
+                        )
+                        weighted_geo_loss = geo_loss * geo_weight
+                        (weighted_geo_loss / float(accum_steps)).backward()
+                else:
+                    geo_loss, geo_stats, weighted_geo_loss = None, None, None
+
+            loss_stats = {
+                "loss_retrieval": float(retrieval_loss.detach().item()),
+            }
+            if retrieval_stats:
+                loss_stats.update(retrieval_stats)
+            if geo_enabled:
+                if weighted_geo_loss is not None:
+                    loss_stats["loss_geo_weighted"] = float(weighted_geo_loss.detach().item())
+                    loss_stats["loss_parallel_total"] = float(
+                        retrieval_loss.detach().item() + weighted_geo_loss.detach().item()
+                    )
+                if geo_stats:
+                    loss_stats.update(geo_stats)
+            total_loss = retrieval_loss / float(accum_steps)
             
             # Add instruction dropout statistics to loss_stats
-            if loss_stats is None:
-                loss_stats = {}
-            if (not getattr(args, "train_inference_lora", False)) and instruction_dropout_prob > 0.0 and model.training:
+            if instruction_dropout_prob > 0.0 and model.training:
                 if num_eligible > 0:
                     loss_stats["inst_dropout_rate"] = num_dropped / num_eligible
                 else:
@@ -915,7 +860,7 @@ def train(
                         args,
                     )
                     total_loss = total_loss / float(accum_steps)
-                scaler.scale(total_loss).backward()
+                retrieval_scaler.scale(total_loss).backward()
             else:
                 total_loss = get_loss_img2text(
                     m,
@@ -934,35 +879,37 @@ def train(
         # optimizer step on accumulation boundary
         if (micro_idx % accum_steps) == 0:
             step = num_updates_per_epoch * epoch + update_idx
+            projection_stats = {}
+            if args.precision == "amp":
+                retrieval_scaler.unscale_(optimizer)
+                if geo_optimizer is not None:
+                    geo_scaler.unscale_(geo_optimizer)
+            if (
+                geo_optimizer is not None
+                and g is not None
+                and getattr(args, "geo_conflict_projection", False)
+            ):
+                projection_stats = project_geo_gradients(m, g)
+                if loss_stats is None:
+                    loss_stats = {}
+                loss_stats.update(projection_stats)
             scheduler(step)
+            if geo_scheduler is not None:
+                geo_scheduler(step)
 
             if args.precision == "amp":
-                scaler.step(optimizer)
-                scaler.update()
+                retrieval_scaler.step(optimizer)
+                retrieval_scaler.update()
+                if geo_optimizer is not None:
+                    geo_scaler.step(geo_optimizer)
+                    geo_scaler.update()
             else:
                 optimizer.step()
-
-            # 🔒 Logit Scale clamp with counter
-            logit_scale_clamp_min = getattr(args, "logit_scale_clamp_min", None)
-            logit_scale_clamp_max = getattr(args, "logit_scale_clamp_max", None)
-
-            if logit_scale_clamp_min is not None or logit_scale_clamp_max is not None:
-                with torch.no_grad():
-                    raw = m.logit_scale.data.clone()
-                    if logit_scale_clamp_min is not None:
-                        min_logit = torch.log(torch.tensor(logit_scale_clamp_min)).to(m.logit_scale.device)
-                        m.logit_scale.data = torch.max(m.logit_scale.data, min_logit)
-                    if logit_scale_clamp_max is not None:
-                        max_logit = torch.log(torch.tensor(logit_scale_clamp_max)).to(m.logit_scale.device)
-                        m.logit_scale.data = torch.min(m.logit_scale.data, max_logit)
-                    if (m.logit_scale.data != raw).any():
-                        if not hasattr(train, 'clamp_hit_count'):
-                            train.clamp_hit_count = 0
-                        train.clamp_hit_count += 1
-                        if is_master(args) and update_idx % 100 == 0:
-                            logging.info(f"🔒 CLAMP HIT #{train.clamp_hit_count}: raw={raw.item():.4f} -> clamped={m.logit_scale.data.item():.4f}")
-
+                if geo_optimizer is not None:
+                    geo_optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            if geo_optimizer is not None:
+                geo_optimizer.zero_grad(set_to_none=True)
 
             batch_time = time.time() - end
             end = time.time()
@@ -970,31 +917,21 @@ def train(
             log_interval = int(getattr(args, "log_interval", 20))
             log_every_s = float(getattr(args, "log_every_s", 60.0))
             now = time.time()
-            preview_every = int(getattr(args, "reason_llm_preview_every", 0))
-            preview_due = (
-                loss_stats is not None
-                and preview_every > 0
-                and ((step + 1) % preview_every == 0)
-                and "reason_preview_pred" in loss_stats
-            )
             should_log = (update_idx % max(log_interval, 1) == 0) or ((now - last_log_time) >= log_every_s)
-            should_log = should_log or preview_due
 
             if is_master(args) and should_log:
-                samples_per_micro = getattr(args, "actual_samples_per_microbatch",
-                                            args.batch_size * args.world_size)
-                num_samples = micro_idx * samples_per_micro
+                # samples processed so far in this epoch (microbatches)
+                num_samples = micro_idx * batch_size * args.world_size
                 samples_per_epoch = getattr(dataloader, "num_samples", None)
                 if samples_per_epoch is None:
-                    samples_per_epoch = num_microbatches * samples_per_micro
+                    samples_per_epoch = num_microbatches * args.batch_size * args.world_size
                 percent_complete = 100.0 * micro_idx / num_microbatches
 
                 total_grad_norm = 0.0
                 if args.debug:
                     params = list(m.parameters()) + list(i2t.parameters())
-                    if reasoning_modules is not None:
-                        rproj = reasoning_modules["projector"]
-                        params += list(rproj.parameters())
+                    if g is not None:
+                        params += list(g.parameters())
                     for p in params:
                         if p.grad is None or (not p.requires_grad):
                             continue
@@ -1007,41 +944,41 @@ def train(
                 f"Train Epoch: {epoch} [{num_samples}/{samples_per_epoch} ({percent_complete:.0f}%)]\t"
                     f"Loss: {(total_loss.detach().item() * float(accum_steps)):.6f}\tData (t) {data_time:.3f}\tBatch (t) {batch_time:.3f}"
                 f"\tLR: {optimizer.param_groups[0]['lr']:5f}\tlogit_scale {m.logit_scale.data:.3f} (exp={logit_scale_exp:.3f})"
-            )
+                )
                 if loss_stats is not None:
-                    if "loss_q2c" in loss_stats and "loss_c2q" in loss_stats:
-                        log_msg += f"\tloss_q2c: {loss_stats['loss_q2c']:.4f}\tloss_c2q: {loss_stats['loss_c2q']:.4f}"
                     if "loss_retrieval" in loss_stats:
                         log_msg += f"\tloss_retrieval: {loss_stats['loss_retrieval']:.4f}"
-                    if "loss_retrieval_scaled" in loss_stats:
-                        log_msg += f"\tloss_ret_scaled: {loss_stats['loss_retrieval_scaled']:.4f}"
-                    if "loss_retrieval_global_scaled" in loss_stats:
-                        log_msg += f"\tloss_ret_global: {loss_stats['loss_retrieval_global_scaled']:.4f}"
-                    if "loss_reason_llm" in loss_stats:
-                        log_msg += f"\tloss_reason_llm: {loss_stats['loss_reason_llm']:.4f}"
-                    if "loss_reason_llm_scaled" in loss_stats:
-                        log_msg += f"\tloss_reason_scaled: {loss_stats['loss_reason_llm_scaled']:.4f}"
-                    if "reason_llm_divisor" in loss_stats:
-                        log_msg += f"\treason_llm_div: {loss_stats['reason_llm_divisor']:.3f}"
-                    if "reason_llm_coeff" in loss_stats:
-                        log_msg += f"\treason_llm_coeff: {loss_stats['reason_llm_coeff']:.4f}"
-                    if "reason_llm_effective_contrib" in loss_stats:
-                        log_msg += f"\treason_llm_term: {loss_stats['reason_llm_effective_contrib']:.4f}"
-                    if "z_reason_align" in loss_stats:
-                        log_msg += f"\tz_reason_align: {loss_stats['z_reason_align']:.4f}"
+                    if "loss_q2c" in loss_stats:
+                        log_msg += f"\tloss_q2c: {loss_stats['loss_q2c']:.4f}\tloss_c2q: {loss_stats['loss_c2q']:.4f}"
+                    if "loss_geo_weighted" in loss_stats:
+                        log_msg += f"\tloss_geo_weighted: {loss_stats['loss_geo_weighted']:.4f}"
+                    if "loss_geom_total" in loss_stats:
+                        log_msg += f"\tloss_geom_total: {loss_stats['loss_geom_total']:.4f}"
+                    if "loss_reverse_consistency" in loss_stats:
+                        log_msg += f"\tloss_reverse: {loss_stats['loss_reverse_consistency']:.4f}"
+                    if "z_fwd_align" in loss_stats:
+                        log_msg += f"\tz_fwd_align: {loss_stats['z_fwd_align']:.4f}"
+                    if "z_rev_align" in loss_stats:
+                        log_msg += f"\tz_rev_align: {loss_stats['z_rev_align']:.4f}"
+                    if "z_fwd_rev_cos" in loss_stats:
+                        log_msg += f"\tz_fwd_rev_cos: {loss_stats['z_fwd_rev_cos']:.4f}"
+                    if "geo_conflict_ratio" in loss_stats:
+                        log_msg += f"\tgeo_conflict: {loss_stats['geo_conflict_ratio']:.2%}"
+                    if "geo_valid_ratio" in loss_stats:
+                        log_msg += f"\tgeo_valid: {loss_stats['geo_valid_ratio']:.2%}"
+                    if "geo_missing_src_ratio" in loss_stats:
+                        log_msg += f"\tgeo_missing_src: {loss_stats['geo_missing_src_ratio']:.2%}"
+                    if "geo_small_delta_ratio" in loss_stats:
+                        log_msg += f"\tgeo_small_delta: {loss_stats['geo_small_delta_ratio']:.2%}"
                     if "inst_dropout_rate" in loss_stats:
                         log_msg += f"\tinst_dropout: {loss_stats['inst_dropout_rate']:.2%}"
+                if args.precision == "amp":
+                    log_msg += f"\tamp_ret: {retrieval_scaler.get_scale():.1f}"
+                    if geo_optimizer is not None and geo_scaler is not None:
+                        log_msg += f"\tamp_geo: {geo_scaler.get_scale():.1f}"
                 if args.debug and total_grad_norm > 0:
                     log_msg += f"\tgrad_norm: {total_grad_norm:.4f}"
                 logging.info(log_msg)
-                if preview_due:
-                    logging.info(
-                        "[reason-preview] src=%s | inst=%s | tgt=%s | pred=%s",
-                        loss_stats.get("reason_preview_src", ""),
-                        loss_stats.get("reason_preview_instruction", ""),
-                        loss_stats.get("reason_preview_target", ""),
-                        loss_stats.get("reason_preview_pred", ""),
-                    )
                 last_log_time = now
 
                 timestep = step
@@ -1059,6 +996,10 @@ def train(
                             log_data[k] = float(v)
                 if args.debug and total_grad_norm > 0:
                     log_data["grad_norm"] = float(total_grad_norm)
+                if args.precision == "amp":
+                    log_data["amp_scale_retrieval"] = float(retrieval_scaler.get_scale())
+                    if geo_optimizer is not None and geo_scaler is not None:
+                        log_data["amp_scale_geo"] = float(geo_scaler.get_scale())
 
                 for name, val in log_data.items():
                     name = "train/" + name
@@ -1067,7 +1008,6 @@ def train(
                     if args.wandb:
                         wandb.log({name: val, "step": timestep})
 
-            # Periodic CIRR validation evaluation (default enabled).
             eval_every = int(getattr(args, "cirr_val_eval_every", 0))
             cirr_eval_enabled = (
                 eval_every > 0
@@ -1126,18 +1066,14 @@ def train(
 
                 model.train()
                 img2text.train()
-                if reasoning_modules is not None:
-                    reasoning_modules["projector"].train()
-                    reasoning_modules["llm"].eval()
+                if geo_text_model is not None:
+                    geo_text_model.train()
 
                 if args.distributed and dist.is_initialized():
                     dist.barrier()
 
             def _save_step_checkpoint(save_step: int):
                 save_path = os.path.join(args.checkpoint_path, f"epoch_{epoch}_step_{save_step}.pt")
-                reason_projector_state = None
-                if reasoning_modules is not None:
-                    reason_projector_state = reasoning_modules["projector"].state_dict()
                 torch.save(
                     {
                         "epoch": epoch,
@@ -1145,24 +1081,27 @@ def train(
                         "name": args.name,
                         "state_dict": model.state_dict(),
                         "state_dict_img2text": img2text.state_dict(),
-                        "state_dict_reason_projector": reason_projector_state,
+                        "state_dict_geo_text": geo_text_model.state_dict() if geo_text_model is not None else None,
                         "optimizer": optimizer.state_dict(),
+                        "optimizer_retrieval": optimizer.state_dict(),
+                        "optimizer_geo": geo_optimizer.state_dict() if geo_optimizer is not None else None,
                     },
                     save_path,
                 )
                 logging.info(f"Saved checkpoint at step {save_step}: {save_path}")
-                # Also save LoRA-only weights (all LoRA params, visual + text).
-                lora_state_dict = {}
-                for n, p in model.named_parameters():
-                    if not (n.endswith(".A") or n.endswith(".B")):
-                        continue
-                    lora_state_dict[n] = p.data.clone()
-                if lora_state_dict:
-                    lora_path = os.path.join(args.checkpoint_path, f"epoch_{epoch}_step_{save_step}_lora.pt")
-                    torch.save(lora_state_dict, lora_path)
-                    logging.info(f"Saved LoRA-only weights ({len(lora_state_dict)} params) to {lora_path}")
 
-            # Save checkpoints by global-step interval within [start, end].
+                if geo_text_model is not None:
+                    geo_lora_state_dict = {}
+                    for n, p in geo_text_model.named_parameters():
+                        if n.endswith(".A") or n.endswith(".B"):
+                            geo_lora_state_dict[n] = p.data.clone()
+                    if geo_lora_state_dict:
+                        geo_lora_path = os.path.join(args.checkpoint_path, f"epoch_{epoch}_step_{save_step}_geo_lora.pt")
+                        torch.save(geo_lora_state_dict, geo_lora_path)
+                        logging.info(
+                            f"Saved geo LoRA-only weights ({len(geo_lora_state_dict)} params) to {geo_lora_path}"
+                        )
+
             if is_master(args):
                 save_step_start = int(getattr(args, "save_step_start", 0))
                 save_step_end = int(getattr(args, "save_step_end", 0))
@@ -1176,20 +1115,5 @@ def train(
                     and ((global_step - save_step_start) % save_step_interval == 0)
                 ):
                     _save_step_checkpoint(global_step)
-
-            # Save checkpoint at specified percentages for single epoch training
-            if save_at_percentages is not None and is_master(args):
-                percent_complete = (update_idx + 1) / num_updates_per_epoch
-                for pct in save_at_percentages:
-                    if not hasattr(train, '_saved_percentages'):
-                        train._saved_percentages = set()
-                    if pct not in train._saved_percentages and percent_complete >= pct:
-                        save_step = update_idx + 1
-                        _save_step_checkpoint(save_step)
-                        train._saved_percentages.add(pct)
-
-            # Log clamp summary at end of epoch
-            if is_master(args) and hasattr(train, 'clamp_hit_count') and train.clamp_hit_count > 0:
-                logging.info(f"🔒 [Epoch {epoch}] Logit scale clamp hit {train.clamp_hit_count} times in total")
 
             update_idx += 1

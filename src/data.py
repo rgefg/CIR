@@ -42,19 +42,18 @@ import torchvision.datasets as datasets
 import torchvision.transforms as T
 from third_party.open_clip.clip import tokenize
 
-
-import os
-import json
-import torch
-import numpy as np
-from PIL import Image
-from torch.utils.data import Dataset
-
 import webdataset as wds
 import webdataset.handlers as wds_handlers
+import webdataset.utils as wds_utils
 
 DILATION = 0.7
 PAD_CROP = True
+
+
+def _seed_dataloader_worker(worker_id):
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
 
 def expand2square(pil_img, background_color=(0, 0, 0)):
     width, height = pil_img.size
@@ -675,7 +674,7 @@ class DataInfo:
     sampler: DistributedSampler
 
 
-def _load_cc3m_cir_jsonl(jsonl_path: str):
+def _load_cc3m_cir_jsonl(jsonl_path: str, reverse_jsonl_path: str = None):
     """id -> (instruction, modified_caption, reverse_instruction)"""
     
     def _normalize_instruction(x):
@@ -789,6 +788,28 @@ def _load_cc3m_cir_jsonl(jsonl_path: str):
             cap = _normalize_modified_caption(obj.get("modified_caption", ""))
             rev = _normalize_reverse_instruction(obj.get("reverse_instruction", ""))
             mp[_id] = (ins, cap, rev)
+
+    if reverse_jsonl_path and os.path.exists(reverse_jsonl_path):
+        updated = 0
+        extra = 0
+        with open(reverse_jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                obj = json.loads(line)
+                _id = str(obj.get("id"))
+                rev = _normalize_reverse_instruction(obj.get("reverse_instruction", ""))
+                if not rev:
+                    continue
+                if _id not in mp:
+                    extra += 1
+                    continue
+                ins, cap, _ = mp[_id]
+                mp[_id] = (ins, cap, rev)
+                updated += 1
+        logging.info(
+            f"Loaded reverse sidecar from {reverse_jsonl_path}: updated={updated} extra_ids_ignored={extra}"
+        )
     return mp
 
 
@@ -874,7 +895,10 @@ def get_cc3m_cir_wds(args, preprocess_fn, is_train, input_filename=None):
     assert args.wds_shards is not None, "--wds-shards is required"
 
     # 加载元数据
-    id2meta = _load_cc3m_cir_jsonl(args.cc3m_cir_jsonl)
+    id2meta = _load_cc3m_cir_jsonl(
+        args.cc3m_cir_jsonl,
+        reverse_jsonl_path=getattr(args, "cc3m_cir_reverse_jsonl", None),
+    )
     exts = args.wds_image_key.split(";")
     rename_str = ";".join(exts)
 
@@ -882,12 +906,21 @@ def get_cc3m_cir_wds(args, preprocess_fn, is_train, input_filename=None):
     select_fn = functools.partial(_cc3m_cir_wds_select, id2meta=id2meta)
     attach_fn = functools.partial(_cc3m_cir_wds_attach, id2meta=id2meta)
     to_tensor_fn = functools.partial(_cc3m_cir_wds_to_tensor, preprocess_fn=preprocess_fn)
+    deterministic_wds = bool(is_train and getattr(args, "wds_deterministic", False))
+    base_seed = int(getattr(args, "seed", 0))
+    if deterministic_wds:
+        logging.info(f"Using deterministic WebDataset sampling with base_seed={base_seed}")
 
     # --- 2. 构建 Pipeline 节点列表 ---
     pipeline = []
 
     # [预处理 shards] 展开 glob pattern 和 brace expansion，处理缓存
     shards_pattern = args.wds_shards
+    if isinstance(shards_pattern, str):
+        if shards_pattern.count("{") != shards_pattern.count("}"):
+            raise ValueError(
+                f"Malformed --wds-shards pattern: unmatched braces in {shards_pattern!r}"
+            )
     
     # 检查是否是 glob pattern（包含 * 或 ?）
     if '*' in shards_pattern or '?' in shards_pattern or '{' in shards_pattern:
@@ -901,6 +934,10 @@ def get_cc3m_cir_wds(args, preprocess_fn, is_train, input_filename=None):
             else:
                 shard_list.append(pattern)
         shards_pattern = shard_list
+        if len(shards_pattern) == 0:
+            raise FileNotFoundError(
+                f"--wds-shards expanded to 0 files. Original pattern: {args.wds_shards!r}"
+            )
         logging.info(f"Expanded shards pattern to {len(shards_pattern)} files")
     
     # [缓存预处理] 如果指定了缓存目录且 shards 是远程 URL，先缓存到本地
@@ -927,7 +964,17 @@ def get_cc3m_cir_wds(args, preprocess_fn, is_train, input_filename=None):
 
     # [源头]
     if is_train and args.wds_resampled:
-        pipeline.append(wds.ResampledShards(shards_pattern))
+        if deterministic_wds:
+            pipeline.append(
+                wds.ResampledShards(
+                    shards_pattern,
+                    seed=base_seed,
+                    worker_seed=wds_utils.pytorch_worker_seed,
+                    deterministic=True,
+                )
+            )
+        else:
+            pipeline.append(wds.ResampledShards(shards_pattern))
     else:
         pipeline.append(wds.SimpleShardList(shards_pattern))
 
@@ -940,7 +987,12 @@ def get_cc3m_cir_wds(args, preprocess_fn, is_train, input_filename=None):
 
     # [Shard 级 Shuffle]
     if is_train and not args.wds_resampled:
-        pipeline.append(wds.shuffle(args.wds_shardshuffle))
+        pipeline.append(
+            wds.shuffle(
+                args.wds_shardshuffle,
+                seed=(base_seed + 17) if deterministic_wds else None,
+            )
+        )
 
     # [解包]
     # Some cached shards may be partially downloaded/corrupted; skip bad tar entries instead of crashing.
@@ -948,7 +1000,12 @@ def get_cc3m_cir_wds(args, preprocess_fn, is_train, input_filename=None):
 
     # [样本级 Shuffle]
     if is_train:
-        pipeline.append(wds.shuffle(args.wds_shuffle))
+        pipeline.append(
+            wds.shuffle(
+                args.wds_shuffle,
+                seed=(base_seed + 23) if deterministic_wds else None,
+            )
+        )
 
     # [解码] 使用 wds.decode 函数
     pipeline.append(wds.decode("pil"))
@@ -974,6 +1031,7 @@ def get_cc3m_cir_wds(args, preprocess_fn, is_train, input_filename=None):
         num_workers=args.workers,
         pin_memory=True,
         drop_last=is_train,
+        worker_init_fn=_seed_dataloader_worker if is_train else None,
     )
 
     # 标记为流式数据 (长度未知)

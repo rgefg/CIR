@@ -4,11 +4,13 @@
 import os
 import time
 import logging
+import random
 from time import gmtime, strftime
 from pathlib import Path
 import json
 import wandb
 import torch
+import numpy as np
 from torch import optim
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -19,7 +21,7 @@ from torch.utils.data import DataLoader
 
 from third_party.open_clip.scheduler import cosine_lr
 from model.clip import _transform, load
-from model.model import convert_weights, CLIP, IM2TEXT, ReasoningProjector
+from model.model import convert_weights, CLIP, IM2TEXT
 from trainer import train
 from data import get_data, CIRR
 from params import parse_args, get_project_root
@@ -30,7 +32,6 @@ import math
 import torch.nn as nn
 import copy
 import types
-import torch.nn.functional as F
 
 
 # -------------------
@@ -54,17 +55,8 @@ class LoRALinear(nn.Module):
         nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
         nn.init.zeros_(self.B)
 
-    @property
-    def lora_weight(self):
-        delta = self.B @ self.A
-        return (self.scaling * delta).to(dtype=self.base.weight.dtype)
-
-    @property
-    def effective_weight(self):
-        return self.base.weight + self.lora_weight
-
     def forward(self, x):
-        out = torch.nn.functional.linear(x, self.base.weight, self.base.bias)
+        out = self.base(x)
         x_d = self.dropout(x)
         A = self.A.to(dtype=x_d.dtype)
         B = self.B.to(dtype=x_d.dtype)
@@ -73,129 +65,18 @@ class LoRALinear(nn.Module):
 
     @property
     def weight(self):
-        return self.effective_weight
+        return self.base.weight
 
     @property
     def bias(self):
         return self.base.bias
 
 
-class LoRAProjection(nn.Module):
-    def __init__(self, out_features: int, in_features: int, r: int = 64, alpha: int = 16):
-        super().__init__()
-        self.r = r
-        self.alpha = alpha
-        self.scaling = alpha / float(r)
-        self.A = nn.Parameter(torch.empty(r, in_features))
-        self.B = nn.Parameter(torch.empty(out_features, r))
-        nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
-        nn.init.zeros_(self.B)
-
-    @property
-    def lora_weight(self):
-        delta = self.B @ self.A
-        return self.scaling * delta
-
-
-class LoRAMultiheadAttention(nn.MultiheadAttention):
-    def __init__(self, base: nn.MultiheadAttention, r: int = 64, alpha: int = 16, dropout: float = 0.0):
-        super().__init__(
-            embed_dim=base.embed_dim,
-            num_heads=base.num_heads,
-            dropout=base.dropout,
-            bias=base.in_proj_bias is not None,
-            add_bias_kv=base.bias_k is not None,
-            add_zero_attn=base.add_zero_attn,
-            kdim=base.kdim,
-            vdim=base.vdim,
-            batch_first=base.batch_first,
-        )
-        super().load_state_dict(base.state_dict())
-
-        if not self._qkv_same_embed_dim:
-            raise NotImplementedError("LoRAMultiheadAttention only supports _qkv_same_embed_dim=True.")
-
-        self.in_proj_weight.requires_grad = False
-        if self.in_proj_bias is not None:
-            self.in_proj_bias.requires_grad = False
-        if self.bias_k is not None:
-            self.bias_k.requires_grad = False
-        if self.bias_v is not None:
-            self.bias_v.requires_grad = False
-
-        self.q_proj_lora = LoRAProjection(self.embed_dim, self.embed_dim, r=r, alpha=alpha)
-        self.k_proj_lora = LoRAProjection(self.embed_dim, self.embed_dim, r=r, alpha=alpha)
-        self.v_proj_lora = LoRAProjection(self.embed_dim, self.embed_dim, r=r, alpha=alpha)
-        self.out_proj = LoRALinear(self.out_proj, r=r, alpha=alpha, dropout=dropout)
-
-    @property
-    def effective_in_proj_weight(self):
-        q_weight, k_weight, v_weight = self.in_proj_weight.chunk(3, dim=0)
-        return torch.cat(
-            [
-                q_weight + self.q_proj_lora.lora_weight.to(dtype=q_weight.dtype, device=q_weight.device),
-                k_weight + self.k_proj_lora.lora_weight.to(dtype=k_weight.dtype, device=k_weight.device),
-                v_weight + self.v_proj_lora.lora_weight.to(dtype=v_weight.dtype, device=v_weight.device),
-            ],
-            dim=0,
-        )
-
-    def forward(
-        self,
-        query,
-        key,
-        value,
-        key_padding_mask=None,
-        need_weights=True,
-        attn_mask=None,
-        average_attn_weights=True,
-        is_causal=False,
-    ):
-        is_batched = query.dim() == 3
-        if self.batch_first and is_batched:
-            if key is value:
-                if query is key:
-                    query = key = value = query.transpose(1, 0)
-                else:
-                    query, key = (x.transpose(1, 0) for x in (query, key))
-                    value = key
-            else:
-                query, key, value = (x.transpose(1, 0) for x in (query, key, value))
-
-        attn_output, attn_output_weights = F.multi_head_attention_forward(
-            query,
-            key,
-            value,
-            self.embed_dim,
-            self.num_heads,
-            self.effective_in_proj_weight,
-            self.in_proj_bias,
-            self.bias_k,
-            self.bias_v,
-            self.add_zero_attn,
-            self.dropout,
-            self.out_proj.weight,
-            self.out_proj.bias,
-            training=self.training,
-            key_padding_mask=key_padding_mask,
-            need_weights=need_weights,
-            attn_mask=attn_mask,
-            average_attn_weights=average_attn_weights,
-            is_causal=is_causal,
-        )
-
-        if self.batch_first and is_batched:
-            return attn_output.transpose(1, 0), attn_output_weights
-        return attn_output, attn_output_weights
-
-
 def apply_lora_to_linear_layers(module: nn.Module, r: int, alpha: int, dropout: float = 0.0):
     for name, child in list(module.named_children()):
-        if isinstance(child, (LoRALinear, LoRAMultiheadAttention)):
+        if isinstance(child, LoRALinear):
             continue
-        if isinstance(child, nn.MultiheadAttention):
-            setattr(module, name, LoRAMultiheadAttention(child, r=r, alpha=alpha, dropout=dropout))
-        elif isinstance(child, nn.Linear):
+        if isinstance(child, nn.Linear):
             setattr(module, name, LoRALinear(child, r=r, alpha=alpha, dropout=dropout))
         else:
             apply_lora_to_linear_layers(child, r=r, alpha=alpha, dropout=dropout)
@@ -212,180 +93,76 @@ def freeze_clip_except_lora_and_logit_scale(model: nn.Module):
         model.logit_scale.requires_grad = True
 
 
-def freeze_clip_text_lora_only(model: nn.Module):
-    """Freeze all CLIP params, train only text-side LoRA A/B params."""
-    for _, p in model.named_parameters():
+def freeze_module_except_lora(module: nn.Module):
+    for _, p in module.named_parameters():
         p.requires_grad = False
-    for n, p in model.named_parameters():
-        if (n.endswith(".A") or n.endswith(".B")) and (not n.startswith("visual.")):
+    for n, p in module.named_parameters():
+        if n.endswith(".A") or n.endswith(".B"):
             p.requires_grad = True
-    if hasattr(model, "logit_scale"):
-        model.logit_scale.requires_grad = False
 
 
-def get_lora_state_dict(model: nn.Module, text_only: bool = False) -> dict:
-    """Extract LoRA parameters (A and B matrices) from model."""
-    lora_state_dict = {}
-    for name, param in model.named_parameters():
+def get_lora_state_dict(module: nn.Module, text_only: bool = False) -> dict:
+    state = {}
+    for name, param in module.named_parameters():
         if not (name.endswith(".A") or name.endswith(".B")):
             continue
         normalized_name = name[len("module."):] if name.startswith("module.") else name
         if text_only and normalized_name.startswith("visual."):
             continue
-        lora_state_dict[name] = param.data.clone()
-    return lora_state_dict
+        state[name] = param.data.clone()
+    return state
 
 
-def _reason_llm_enabled(args) -> bool:
-    return bool(getattr(args, "reason_llm_model", None)) and float(getattr(args, "reason_llm_weight", 0.0)) > 0.0
+class TextEncoderBranch(nn.Module):
+    def __init__(self, clip_model: nn.Module):
+        super().__init__()
+        base = clip_model.module if hasattr(clip_model, "module") else clip_model
+        self.transformer = copy.deepcopy(base.transformer)
+        self.token_embedding = copy.deepcopy(base.token_embedding)
+        self.positional_embedding = nn.Parameter(base.positional_embedding.detach().clone())
+        self.ln_final = copy.deepcopy(base.ln_final)
+        self.text_projection = nn.Parameter(base.text_projection.detach().clone())
+        self.end_id = int(base.end_id)
+
+    @property
+    def dtype(self):
+        return self.token_embedding.weight.dtype
+
+    def encode_text(self, text):
+        x = self.token_embedding(text).type(self.dtype)
+        x = x + self.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)
+        x = self.transformer(x)
+        x = x.permute(1, 0, 2)
+        x = self.ln_final(x).type(self.dtype)
+        collect_ind = text == self.end_id
+        collect_ind = collect_ind.nonzero()[:, 1]
+        x = x[torch.arange(x.size(0), device=x.device), collect_ind] @ self.text_projection
+        return x
 
 
-def _get_llm_hidden_size(model) -> int:
-    for attr in ["hidden_size", "n_embd", "d_model"]:
-        value = getattr(model.config, attr, None)
-        if value is not None:
-            return int(value)
-    raise ValueError("Could not infer hidden size from frozen LLM config.")
+def copy_text_branch_weights_from_clip(text_branch: nn.Module, clip_model: nn.Module):
+    branch = text_branch.module if hasattr(text_branch, "module") else text_branch
+    base = clip_model.module if hasattr(clip_model, "module") else clip_model
+
+    branch.transformer.load_state_dict(base.transformer.state_dict(), strict=True)
+    branch.token_embedding.load_state_dict(base.token_embedding.state_dict(), strict=True)
+    branch.ln_final.load_state_dict(base.ln_final.state_dict(), strict=True)
+    with torch.no_grad():
+        branch.positional_embedding.copy_(base.positional_embedding.detach())
+        branch.text_projection.copy_(base.text_projection.detach())
+    branch.end_id = int(base.end_id)
 
 
-def _get_reason_llm_dtype(args):
-    dtype_name = str(getattr(args, "reason_llm_dtype", "fp16")).lower()
-    if dtype_name == "fp32":
-        return torch.float32
-    if dtype_name == "bf16":
-        return torch.bfloat16
-    return torch.float16
-
-
-def _resolve_reason_llm_source(args) -> str:
-    model_spec = str(getattr(args, "reason_llm_model", "") or "").strip()
-    if not model_spec:
-        raise ValueError("reason_llm_model is empty while frozen-LLM branch is enabled.")
-
-    lower_spec = model_spec.lower()
-    # Allow short aliases for convenience.
-    alias_map = {
-        "qwen3.5-2b": "Qwen/Qwen3.5-2B",
-        "qwen-3.5-2b": "Qwen/Qwen3.5-2B",
-    }
-    hf_model_id = alias_map.get(lower_spec, model_spec)
-
-    local_dir_arg = getattr(args, "reason_llm_local_dir", None)
-    if local_dir_arg:
-        local_dir = Path(local_dir_arg).expanduser()
-    elif hf_model_id == "Qwen/Qwen3.5-2B":
-        local_dir = Path(get_project_root()) / "checkpoint" / "hf_models" / "Qwen3.5-2B"
-    else:
-        local_dir = None
-
-    if local_dir is not None and local_dir.exists():
-        return str(local_dir)
-
-    if local_dir is not None and bool(getattr(args, "reason_llm_auto_download", False)):
-        try:
-            from huggingface_hub import snapshot_download
-        except ImportError as exc:
-            raise ImportError(
-                "reason_llm_auto_download=True requires huggingface_hub. "
-                "Please install it via pip install huggingface_hub."
-            ) from exc
-        local_dir.mkdir(parents=True, exist_ok=True)
-        if is_master(args):
-            logging.info(f"⬇️ Downloading frozen LLM '{hf_model_id}' to local dir: {local_dir}")
-        snapshot_download(
-            repo_id=hf_model_id,
-            local_dir=str(local_dir),
-            local_dir_use_symlinks=False,
-            token=getattr(args, "reason_llm_hf_token", None),
-            revision=getattr(args, "reason_llm_revision", None),
-        )
-        if is_master(args):
-            logging.info(f"✅ Frozen LLM download completed: {local_dir}")
-        return str(local_dir)
-
-    # Fallback to direct HF repo ID / user-provided source.
-    return hf_model_id
-
-
-def build_reasoning_modules(args, model, img2text, device):
-    if not _reason_llm_enabled(args):
-        return None
-
-    try:
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-    except ImportError as exc:
-        raise ImportError(
-            "reason_llm_model was set, but transformers is not installed in this environment."
-        ) from exc
-
-    if is_master(args):
-        logging.info("=" * 80)
-        logging.info("🧠 Building frozen-LLM reasoning branch")
-        logging.info(f"   reason_llm_model: {args.reason_llm_model}")
-        logging.info(f"   reason_llm_divisor: {args.reason_llm_weight}")
-        logging.info(f"   soft_prompt_len: {args.reason_llm_soft_prompt_len}")
-        logging.info("=" * 80)
-
-    llm_source = _resolve_reason_llm_source(args)
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        llm_source,
-        trust_remote_code=bool(getattr(args, "reason_llm_trust_remote_code", False)),
-    )
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "right"
-
-    llm_load_kwargs = {
-        "trust_remote_code": bool(getattr(args, "reason_llm_trust_remote_code", False)),
-        "low_cpu_mem_usage": True,
-    }
-    llm_dtype = _get_reason_llm_dtype(args)
-    try:
-        llm = AutoModelForCausalLM.from_pretrained(
-            llm_source,
-            dtype=llm_dtype,
-            **llm_load_kwargs,
-        )
-    except TypeError:
-        llm = AutoModelForCausalLM.from_pretrained(
-            llm_source,
-            torch_dtype=llm_dtype,
-            **llm_load_kwargs,
-        )
-    llm.config.use_cache = False
-    llm.requires_grad_(False)
-    llm.eval()
-    llm.to(device)
-
-    projector = ReasoningProjector(
-        embed_dim=model.embed_dim,
-        middle_dim=args.middle_dim,
-        clip_token_dim=model.token_embedding.weight.shape[1],
-        llm_hidden_size=_get_llm_hidden_size(llm),
-        prompt_length=int(getattr(args, "reason_llm_soft_prompt_len", 4)),
-        n_layer=args.n_layer,
-        dropout=getattr(args, "droprate", 0.1),
-    )
-    if getattr(args, "reason_projector_init", "pic2word") == "pic2word":
-        msg = projector.init_from_img2text(img2text)
-        if is_master(args):
-            logging.info(
-                "Initialized reasoning projector stem from pic2word weights "
-                f"(missing={len(msg.missing_keys)}, unexpected={len(msg.unexpected_keys)})."
-            )
-    projector.to(device)
-
-    if is_master(args):
-        proj_for_log = projector.module if hasattr(projector, "module") else projector
-        proj_params = sum(p.numel() for p in proj_for_log.parameters())
-        logging.info(f"   reasoning projector parameters: {proj_params:,}")
-
-    return {
-        "projector": projector,
-        "llm": llm,
-        "tokenizer": tokenizer,
-    }
+def seed_everything(base_seed: int, rank_offset: int = 0):
+    seed = int(base_seed) + int(rank_offset)
+    random.seed(seed)
+    np.random.seed(seed % (2 ** 32))
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    return seed
 
 
 def main_worker(gpu, ngpus_per_node, log_queue, args):
@@ -416,6 +193,19 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     if args.gpu is not None:
         logging.info(f"Use GPU: {args.gpu} for training")
         torch.cuda.set_device(args.gpu)
+
+    rank_offset = args.rank if args.rank is not None else 0
+    effective_seed = seed_everything(args.seed, rank_offset=rank_offset)
+    if args.deterministic_train:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+    else:
+        cudnn.benchmark = True
+        cudnn.deterministic = False
+    logging.info(
+        f"Random seed initialized: base_seed={args.seed} rank_offset={rank_offset} effective_seed={effective_seed} "
+        f"deterministic_train={args.deterministic_train}"
+    )
 
     # =========================================================================
     # 1. Build CLIP Model
@@ -595,43 +385,37 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     if not getattr(args, "no_lora", False):
         apply_lora_to_linear_layers(model, r=getattr(args, "lora_r", 64), alpha=getattr(args, "lora_alpha", 16), dropout=getattr(args, "lora_dropout", 0.0))
     
-    # Joint training (train_inference_lora) now uses retrieval + LLM loss together,
-    # so both visual and text LoRA must be trainable (same as retrieval-only path).
     freeze_clip_except_lora_and_logit_scale(model)
+    geo_text_model = None
+    if float(getattr(args, "geo_weight", 0.0)) > 0.0:
+        geo_text_model = TextEncoderBranch(model)
+        if not getattr(args, "no_lora", False):
+            apply_lora_to_linear_layers(
+                geo_text_model,
+                r=getattr(args, "lora_r", 64),
+                alpha=getattr(args, "lora_alpha", 16),
+                dropout=getattr(args, "lora_dropout", 0.0),
+            )
+        freeze_module_except_lora(geo_text_model)
     
     # ============================================================
     # 🔒 Logit Scale 修复选项
     # ============================================================
     # 如果logit_scale被错误初始化或加载，可以强制重置
     if getattr(args, "reset_logit_scale", False):
-        import numpy as np
         with torch.no_grad():
             model.logit_scale.data.fill_(np.log(1 / 0.07))  # 标准CLIP初始化
         if is_master(args):
             logging.info("🔧 Reset logit_scale to standard CLIP value: log(1/0.07) ≈ 2.659")
-
+    
     # 可选：锁定logit_scale（用于调试）
     if getattr(args, "freeze_logit_scale", False):
         model.logit_scale.requires_grad = False
         if is_master(args):
             logging.info("🔒 Frozen logit_scale (requires_grad=False) for debugging")
-
-    # 🔒 两阶段 logit_scale 训练
-    # 前 freeze_percent 步冻结，后解冻但 clamp 到安全区间
-    logit_scale_clamp_min = getattr(args, "logit_scale_clamp_min", None)
-    logit_scale_clamp_max = getattr(args, "logit_scale_clamp_max", None)
-    logit_scale_freeze_percent = getattr(args, "logit_scale_freeze_percent", 0.3)
-
-    # 在 trainer.py 中会使用这些参数来控制 logit_scale 的训练和 clamp
-    if logit_scale_clamp_min is not None or logit_scale_clamp_max is not None:
-        if is_master(args):
-            logging.info(f"📏 Logit Scale clamp: [{logit_scale_clamp_min}, {logit_scale_clamp_max}]")
-
-    if is_master(args):
-        logging.info(f"⏳ Logit Scale first {logit_scale_freeze_percent*100:.0f}% steps frozen, then trainable with clamping")
     # ============================================================
     
-    # img2text is always trainable (joint training needs it for retrieval loss).
+    # img2text always trainable
     for p in img2text.parameters():
         p.requires_grad = True
     
@@ -640,11 +424,18 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         img2text_params = sum(p.numel() for p in img2text.parameters())
+        geo_trainable_params = (
+            sum(p.numel() for p in geo_text_model.parameters() if p.requires_grad)
+            if geo_text_model is not None
+            else 0
+        )
         logging.info("=" * 80)
         logging.info("📊 Model Parameter Statistics:")
         logging.info(f"   CLIP total parameters: {total_params:,}")
         logging.info(f"   CLIP trainable parameters: {trainable_params:,} ({100.*trainable_params/total_params:.2f}%)")
         logging.info(f"   img2text parameters: {img2text_params:,}")
+        if geo_text_model is not None:
+            logging.info(f"   geo text branch trainable parameters: {geo_trainable_params:,}")
         
         # Verify img2text weights are non-zero (if loaded from checkpoint)
         if args.pic2word_pretrained:
@@ -669,91 +460,51 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     else:
         model.cuda(args.gpu)
         img2text.cuda(args.gpu)
+        if geo_text_model is not None:
+            geo_text_model.cuda(args.gpu)
 
         if args.precision == "fp16":
             convert_weights(model)
             convert_weights(img2text)
+            if geo_text_model is not None:
+                convert_weights(geo_text_model)
 
         if args.distributed and args.use_bn_sync:
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
         if args.distributed:
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
-            img2text_has_trainable = any(p.requires_grad for p in img2text.parameters())
-            if img2text_has_trainable:
-                img2text = torch.nn.parallel.DistributedDataParallel(
-                    img2text, device_ids=[args.gpu], find_unused_parameters=False
+            img2text = torch.nn.parallel.DistributedDataParallel(img2text, device_ids=[args.gpu], find_unused_parameters=False)
+            if geo_text_model is not None:
+                geo_text_model = torch.nn.parallel.DistributedDataParallel(
+                    geo_text_model, device_ids=[args.gpu], find_unused_parameters=False
                 )
-            elif is_master(args):
-                logging.info("img2text has no trainable parameters; skip wrapping it with DDP.")
         
         # ... (DP logic omitted for brevity, Distributed is preferred)
 
-    reasoning_modules = None
-    if _reason_llm_enabled(args):
-        if not getattr(args, "train_inference_lora", False) and is_master(args):
-            logging.warning(
-                "Frozen-LLM reasoning supervision is currently designed for dict-batch training. "
-                "It is recommended to pair it with --train-inference-lora."
-            )
-        if is_master(args):
-            if torch.cuda.is_available():
-                reasoning_device = torch.device(f"cuda:{args.gpu}" if args.gpu is not None else "cuda")
-            else:
-                reasoning_device = torch.device("cpu")
-            reasoning_modules = build_reasoning_modules(
-                args,
-                model.module if hasattr(model, "module") else model,
-                img2text,
-                reasoning_device,
-            )
-            logging.info(
-                f"🧠 LLM loaded on rank 0 only (GPU {args.gpu}). "
-                f"Other {args.world_size - 1} ranks run retrieval loss only."
-            )
-        else:
-            logging.info(f"Rank {args.rank}: skipping LLM load (rank 0 handles reasoning).")
-
-    # Rank 0 carries the LLM so it may need a smaller retrieval batch.
-    args.base_batch_size = args.batch_size
-    rank0_bs = int(getattr(args, "rank0_batch_size", 0))
-    if rank0_bs > 0 and is_master(args) and reasoning_modules is not None:
-        args.batch_size = rank0_bs
-        actual_per_microbatch = rank0_bs + args.base_batch_size * (args.world_size - 1)
-        args.actual_samples_per_microbatch = actual_per_microbatch
-        logging.info(
-            f"🔧 Rank 0 batch_size overridden: {args.base_batch_size} → {rank0_bs} "
-            f"(LLM occupies GPU memory). "
-            f"Actual per micro-batch: {rank0_bs}+{args.base_batch_size}×{args.world_size - 1}={actual_per_microbatch}"
-        )
-    else:
-        args.actual_samples_per_microbatch = args.batch_size * args.world_size
-
     # Data
     data = get_data(args, (preprocess_train, preprocess_val))
+    args.actual_samples_per_microbatch = args.batch_size * args.world_size
     args.cirr_val_eval_log_path = os.path.join(args.logs, args.name, "cirr_val_eval.log")
     cirr_eval_every = int(getattr(args, "cirr_val_eval_every", 0))
     if cirr_eval_every > 0:
         try:
             root_project = os.path.join(get_project_root(), "data")
-            cirr_val_batch_size = int(args.batch_size)
-            cirr_val_workers = int(args.workers)
-
             source_dataset = CIRR(transforms=preprocess_val, root=root_project)
             target_dataset = CIRR(transforms=preprocess_val, root=root_project, mode="imgs")
             data["cirr_val_query_loader"] = DataLoader(
                 source_dataset,
-                batch_size=cirr_val_batch_size,
+                batch_size=int(args.batch_size),
                 shuffle=False,
-                num_workers=cirr_val_workers,
+                num_workers=int(args.workers),
                 pin_memory=True,
                 drop_last=False,
             )
             data["cirr_val_target_loader"] = DataLoader(
                 target_dataset,
-                batch_size=cirr_val_batch_size,
+                batch_size=int(args.batch_size),
                 shuffle=False,
-                num_workers=cirr_val_workers,
+                num_workers=int(args.workers),
                 pin_memory=True,
                 drop_last=False,
             )
@@ -761,12 +512,11 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                 logging.info(
                     f"✅ Periodic CIRR-val eval enabled: every {cirr_eval_every} steps, "
                     f"query={len(source_dataset)}, gallery={len(target_dataset)}, "
-                    f"batch_size={cirr_val_batch_size}, workers={cirr_val_workers}, "
                     f"log_file={args.cirr_val_eval_log_path}"
                 )
-        except Exception as e:
+        except Exception as exc:
             if is_master(args):
-                logging.warning(f"⚠️ Failed to initialize periodic CIRR-val eval; disabling it. Error: {e}")
+                logging.warning(f"⚠️ Failed to initialize periodic CIRR-val eval; disabling it. Error: {exc}")
             args.cirr_val_eval_every = 0
 
     # ---- Optimizer ----
@@ -776,27 +526,38 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     def include(n):
         return not exclude(n)
 
-    # collect trainable params
-    named_parameters = []
-    img2text_for_opt = img2text.module if hasattr(img2text, "module") else img2text
-    model_for_opt = model.module if hasattr(model, "module") else model
-    named_parameters += list(img2text_for_opt.named_parameters())
-    named_parameters += list(model_for_opt.named_parameters())
-    if reasoning_modules is not None:
-        named_parameters += list(reasoning_modules["projector"].named_parameters())
+    def build_param_groups(named_parameters):
+        gain_or_bias_params = [p for n, p in named_parameters if exclude(n) and p.requires_grad]
+        rest_params = [p for n, p in named_parameters if include(n) and p.requires_grad]
+        groups = []
+        if gain_or_bias_params:
+            groups.append({"params": gain_or_bias_params, "weight_decay": 0.0})
+        if rest_params:
+            groups.append({"params": rest_params, "weight_decay": args.wd})
+        return groups
 
-    gain_or_bias_params = [p for n, p in named_parameters if exclude(n) and p.requires_grad]
-    rest_params = [p for n, p in named_parameters if include(n) and p.requires_grad]
+    retrieval_named_parameters = []
+    retrieval_named_parameters += list((img2text.module if (args.distributed or args.dp) else img2text).named_parameters())
+    retrieval_named_parameters += list((model.module if (args.distributed or args.dp) else model).named_parameters())
+    geo_named_parameters = []
+    if geo_text_model is not None:
+        geo_named_parameters += list((geo_text_model.module if (args.distributed or args.dp) else geo_text_model).named_parameters())
 
     optimizer = optim.AdamW(
-        [
-            {"params": gain_or_bias_params, "weight_decay": 0.0},
-            {"params": rest_params, "weight_decay": args.wd},
-        ],
+        build_param_groups(retrieval_named_parameters),
         lr=args.lr,
         betas=(args.beta1, args.beta2),
         eps=args.eps,
     )
+    geo_optimizer = None
+    geo_param_groups = build_param_groups(geo_named_parameters)
+    if geo_param_groups:
+        geo_optimizer = optim.AdamW(
+            geo_param_groups,
+            lr=args.lr,
+            betas=(args.beta1, args.beta2),
+            eps=args.eps,
+        )
 
     # ---- Scheduler ----
     nb = getattr(data["train"].dataloader, "num_batches", None)
@@ -804,8 +565,12 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         nb = getattr(args, "wds_epoch_steps", 100000)
     total_steps = nb * args.epochs
     scheduler = cosine_lr(optimizer, args.lr, args.warmup, total_steps)
+    geo_scheduler = cosine_lr(geo_optimizer, args.lr, args.warmup, total_steps) if geo_optimizer is not None else None
 
-    scaler = GradScaler() if args.precision == "amp" else None
+    # Keep AMP state fully separated so geo overflows/backoff cannot perturb
+    # retrieval branch scaling behavior.
+    retrieval_scaler = GradScaler() if args.precision == "amp" else None
+    geo_scaler = GradScaler() if (args.precision == "amp" and geo_optimizer is not None) else None
 
     # Resume Logic (Training Resume, not Pretrain Load)
     start_epoch = 0
@@ -825,41 +590,46 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             start_epoch = checkpoint["epoch"]
             sd = checkpoint["state_dict"]
             sd_img2text = checkpoint["state_dict_img2text"]
-            sd_reason_projector = checkpoint.get("state_dict_reason_projector", None)
             
             # Handle DDP
             if not args.distributed and next(iter(sd.items()))[0].startswith("module"):
                 sd = {k[len("module.") :]: v for k, v in sd.items()}
             if not args.distributed and next(iter(sd_img2text.items()))[0].startswith("module"):
                 sd_img2text = {k[len("module.") :]: v for k, v in sd_img2text.items()}
-            if (
-                sd_reason_projector is not None
-                and not args.distributed
-                and next(iter(sd_reason_projector.items()))[0].startswith("module")
-            ):
-                sd_reason_projector = {k[len("module.") :]: v for k, v in sd_reason_projector.items()}
 
             model.load_state_dict(sd, strict=False)
             img2text.load_state_dict(sd_img2text, strict=True)
-            if reasoning_modules is not None and sd_reason_projector is not None:
-                reasoning_modules["projector"].load_state_dict(sd_reason_projector, strict=True)
-                logging.info("=> loaded reasoning projector state from resume checkpoint")
-            elif reasoning_modules is not None and is_master(args):
-                logging.warning(
-                    "Resume checkpoint does not contain state_dict_reason_projector; "
-                    "reasoning projector will keep its warm-start initialization."
-                )
-            if optimizer is not None:
+            if geo_text_model is not None and checkpoint.get("state_dict_geo_text") is not None:
+                sd_geo = checkpoint["state_dict_geo_text"]
+                if not args.distributed and next(iter(sd_geo.items()))[0].startswith("module"):
+                    sd_geo = {k[len("module.") :]: v for k, v in sd_geo.items()}
+                geo_text_model.load_state_dict(sd_geo, strict=False)
+            elif geo_text_model is not None:
+                copy_text_branch_weights_from_clip(geo_text_model, model)
+                logging.info("Initialized geo text branch from retrieval text tower (checkpoint had no geo branch state).")
+
+            retrieval_optimizer_state = checkpoint.get("optimizer_retrieval")
+            if retrieval_optimizer_state is None:
+                retrieval_optimizer_state = checkpoint.get("optimizer")
+            if optimizer is not None and retrieval_optimizer_state is not None:
                 try:
-                    optimizer.load_state_dict(checkpoint["optimizer"])
-                except Exception as exc:
-                    logging.warning(f"Skipping optimizer state restore due to mismatch: {exc}")
+                    optimizer.load_state_dict(retrieval_optimizer_state)
+                except ValueError as exc:
+                    logging.warning(f"Skipping retrieval optimizer state due to param-group mismatch: {exc}")
+
+            geo_optimizer_state = checkpoint.get("optimizer_geo")
+            if geo_optimizer is not None and geo_optimizer_state is not None:
+                try:
+                    geo_optimizer.load_state_dict(geo_optimizer_state)
+                except ValueError as exc:
+                    logging.warning(f"Skipping geo optimizer state due to param-group mismatch: {exc}")
+            elif geo_optimizer is not None and checkpoint.get("optimizer") is not None and checkpoint.get("optimizer_retrieval") is None:
+                logging.warning(
+                    "Skipping legacy combined optimizer state for geo branch because retrieval/geo optimizers are now split."
+                )
             logging.info(f"=> loaded RESUME checkpoint '{args.resume}' (epoch {checkpoint['epoch']})")
         else:
             logging.info(f"=> no checkpoint found at '{args.resume}'")
-
-    cudnn.benchmark = True
-    cudnn.deterministic = False
 
     args.save_logs = (args.logs is not None and args.logs != "" and args.logs.lower() != "none") and (
         (not args.distributed) or args.gpu == 0
@@ -883,59 +653,44 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         if args.gpu == 0:
             logging.info(f"Start epoch {epoch}")
 
-        # Train and save at 25%, 50%, 75% for single epoch training
-        if args.epochs == 1:
-            train(
-                model,
-                img2text,
-                data,
-                epoch,
-                optimizer,
-                scaler,
-                scheduler,
-                args,
-                writer,
-                save_at_percentages=[0.25, 0.5, 0.75],
-                reasoning_modules=reasoning_modules,
-            )
-        else:
-            train(
-                model,
-                img2text,
-                data,
-                epoch,
-                optimizer,
-                scaler,
-                scheduler,
-                args,
-                writer,
-                reasoning_modules=reasoning_modules,
-            )
-
+        train(
+            model,
+            img2text,
+            data,
+            epoch,
+            optimizer,
+            retrieval_scaler,
+            scheduler,
+            args,
+            writer,
+            geo_text_model=geo_text_model,
+            geo_optimizer=geo_optimizer,
+            geo_scheduler=geo_scheduler,
+            geo_scaler=geo_scaler,
+        )
         if args.save_logs and (args.gpu == 0 or (not args.distributed)):
             if (epoch + 1) == args.epochs or (args.save_frequency > 0 and ((epoch + 1) % args.save_frequency) == 0):
-                # For single epoch, also save final checkpoint
-                checkpoint_path = os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt")
-                reason_projector_state = None
-                if reasoning_modules is not None:
-                    reason_projector_state = reasoning_modules["projector"].state_dict()
                 torch.save(
                     {
                         "epoch": epoch + 1,
                         "name": args.name,
                         "state_dict": model.state_dict(),
                         "state_dict_img2text": img2text.state_dict(),
-                        "state_dict_reason_projector": reason_projector_state,
+                        "state_dict_geo_text": geo_text_model.state_dict() if geo_text_model is not None else None,
                         "optimizer": optimizer.state_dict(),
+                        "optimizer_retrieval": optimizer.state_dict(),
+                        "optimizer_geo": geo_optimizer.state_dict() if geo_optimizer is not None else None,
                     },
-                    checkpoint_path,
+                    os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt"),
                 )
-                # Also save LoRA-only weights (all LoRA params, visual + text)
-                lora_state_dict = get_lora_state_dict(model, text_only=False)
-                if lora_state_dict:
-                    lora_path = os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}_lora.pt")
-                    torch.save(lora_state_dict, lora_path)
-                    logging.info(f"Saved LoRA-only weights ({len(lora_state_dict)} params) to {lora_path}")
+                if geo_text_model is not None:
+                    geo_lora_state_dict = get_lora_state_dict(geo_text_model, text_only=False)
+                    if geo_lora_state_dict:
+                        geo_lora_path = os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}_geo_lora.pt")
+                        torch.save(geo_lora_state_dict, geo_lora_path)
+                        logging.info(
+                            f"Saved geo LoRA-only weights ({len(geo_lora_state_dict)} params) to {geo_lora_path}"
+                        )
     
     if args.wandb and (args.gpu == 0 or (not args.distributed)):
         wandb.finish()

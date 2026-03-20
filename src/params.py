@@ -364,6 +364,12 @@ def parse_args():
         help="Path to cc3m_cir_dataset_full.jsonl (id/instruction/modified_caption).",
     )
     parser.add_argument(
+        "--cc3m-cir-reverse-jsonl",
+        type=str,
+        default=None,
+        help="Optional sidecar JSONL that supplies reverse_instruction by id without changing the base retrieval set.",
+    )
+    parser.add_argument(
         "--wds-shards",
         type=str,
         default=None,
@@ -411,14 +417,29 @@ def parse_args():
         default=None,
         help="Local cache directory for WebDataset shards. If set, remote shards will be downloaded and cached here.",
     )
+    parser.add_argument(
+        "--wds-deterministic",
+        action="store_true",
+        default=False,
+        help="Use fixed seeds for WebDataset shard/sample resampling and shuffling.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=3407,
+        help="Base random seed for training reproducibility and fair geo on/off ablations.",
+    )
+    parser.add_argument(
+        "--deterministic-train",
+        action="store_true",
+        default=False,
+        help="Enable deterministic cuDNN settings for fair ablations.",
+    )
 
     # ---- Lcom training hyperparams (paper defaults) ----
     parser.add_argument("--lora-r", type=int, default=64)
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--lora-dropout", type=float, default=0.0)
-    parser.add_argument("--instruction-dropout-prob", type=float, default=0.0,
-                        help="Probability of dropping instruction (replacing with empty string or generic prompt). "
-                             "Set to 0.5 to force model to rely on visual features when instruction is missing.")
     parser.add_argument("--reset-logit-scale", action="store_true", default=False,
                         help="Reset logit_scale to standard CLIP value (log(1/0.07) ≈ 2.659) at start of training.")
     parser.add_argument("--freeze-logit-scale", action="store_true", default=False,
@@ -432,52 +453,31 @@ def parse_args():
     parser.add_argument("--logit-scale-freeze-percent", type=float, default=0.3,
                         help="Percentage of steps to freeze logit_scale (default: 0.3 = first 30%%). After this, logit_scale will be trained with clamping.")
     parser.add_argument("--no-lora", action="store_true", default=False)
-    parser.add_argument("--train-inference-lora", action="store_true", default=False,
-                        help="Enable inference-LoRA objective: train text encoder LoRA only with reverse instruction loss.")
-    parser.add_argument("--infer-neg-margin", type=float, default=0.2,
-                        help="Negative cosine margin for inference-LoRA loss.")
-    parser.add_argument("--infer-neg-weight", type=float, default=1.0,
-                        help="Weight for negative terms in inference-LoRA loss.")
-    parser.add_argument("--infer-retrieval-weight", type=float, default=0.2,
-                        help="Auxiliary retrieval loss weight during inference-LoRA training to preserve CIRR retrieval quality.")
-    parser.add_argument("--infer-geom-weight", type=float, default=1.0,
-                        help="Overall weight for the geometric inference-LoRA losses (fwd/rev/zero). Set to 0 for an LLM-only run.")
-    parser.add_argument("--reason-llm-model", type=str, default=None,
-                        help="Local path or model id for the frozen decoder-only LLM used to supervise z_reason.")
-    parser.add_argument("--reason-llm-local-dir", type=str, default=None,
-                        help="Local directory to store/load the frozen LLM. If set, this path is preferred.")
-    parser.add_argument("--reason-llm-auto-download", action="store_true", default=False,
-                        help="Automatically download frozen LLM from Hugging Face when local dir is missing.")
-    parser.add_argument("--reason-llm-hf-token", type=str, default=None,
-                        help="Optional Hugging Face token for gated/private models.")
-    parser.add_argument("--reason-llm-revision", type=str, default=None,
-                        help="Optional model revision/branch/tag for Hugging Face downloads.")
-    parser.add_argument("--reason-llm-weight", type=float, default=0.0,
-                        help="Divisor n for dynamic frozen-LLM weighting: each step keeps the LLM term at "
-                             "retrieval_loss / n in the optimized scalar loss. Set 0 to disable the branch.")
-    parser.add_argument("--reason-llm-soft-prompt-len", type=int, default=4,
-                        help="Number of learned soft-prompt tokens projected from z_reason.")
-    parser.add_argument("--reason-llm-max-prompt-len", type=int, default=128,
-                        help="Max token length for the textual scaffold fed to the frozen LLM.")
-    parser.add_argument("--reason-llm-max-target-len", type=int, default=48,
-                        help="Max token length for the target caption labels in the frozen LLM branch.")
-    parser.add_argument("--reason-llm-template", type=str,
-                        default="Source caption: {src}\nInstruction: {instruction}\nTarget caption:",
-                        help="Textual scaffold for the frozen-LLM branch. Available fields: {src}, {instruction}.")
-    parser.add_argument("--reason-projector-init", type=str, default="pic2word",
-                        choices=["pic2word", "random"],
-                        help="Initialization for the reasoning projector stem.")
-    parser.add_argument("--reason-llm-dtype", type=str, default="fp16",
-                        choices=["fp16", "bf16", "fp32"],
-                        help="Weight dtype for the frozen LLM.")
-    parser.add_argument("--reason-llm-trust-remote-code", action="store_true", default=False,
-                        help="Pass trust_remote_code=True when loading the frozen LLM/tokenizer.")
-    parser.add_argument("--rank0-batch-size", type=int, default=0,
-                        help="Override batch_size on rank 0 when LLM is loaded there. "
-                             "Set to a small value (e.g. 10) to leave GPU memory for the frozen LLM. "
-                             "0 = no override (use --batch-size for all ranks).")
-    parser.add_argument("--reason-llm-preview-every", type=int, default=0,
-                        help="If > 0, log a teacher-forced greedy text preview from the frozen LLM every N optimizer updates.")
+    parser.add_argument("--geo-weight", type=float, default=0.0,
+                        help="Weight applied to the auxiliary geo branch. Set 0 to disable the geo branch.")
+    parser.add_argument("--geo-conflict-projection", action="store_true", default=False,
+                        help="Project geo gradients away from conflicting retrieval gradients.")
+    parser.add_argument("--geo-reverse-weight", type=float, default=0.25,
+                        help="Weight for the soft reverse-instruction consistency term in the geo branch.")
+    parser.add_argument("--geo-reverse-margin", type=float, default=0.0,
+                        help="Penalize geo forward/reverse cosine values above -margin; 0 only penalizes positive cosine.")
+    parser.add_argument("--geo-embed-norm-eps", type=float, default=1e-6,
+                        help="Epsilon used when normalizing geo text embeddings.")
+    parser.add_argument("--geo-delta-norm-eps", type=float, default=1e-4,
+                        help="Lower bound used when normalizing the geo delta direction z_tgt - z_src.")
+    parser.add_argument("--geo-delta-min-norm", type=float, default=1e-3,
+                        help="Skip geo samples whose text delta norm is too small to define a stable direction.")
+    parser.add_argument("--cirr-val-merge-base", type=str, default=None,
+                        help="Full checkpoint used as the retrieval base when doing periodic merged CIRR validation.")
+    parser.add_argument("--cirr-val-merge-density", type=float, default=0.9,
+                        help="TIES density used for periodic merged CIRR validation.")
+    parser.add_argument("--cirr-val-merge-weights", type=float, nargs=2, default=[0.5, 0.5],
+                        metavar=("BASE_W", "GEO_W"),
+                        help="TIES weights for [retrieval_base, current_geo_lora] during merged CIRR validation.")
+    parser.add_argument("--cirr-val-merge-gpu", type=int, default=None,
+                        help="Dedicated GPU index for periodic merged CIRR validation. Leave unset to disable in-process scheduling.")
+    parser.add_argument("--cirr-val-merge-timeout", type=int, default=1800,
+                        help="Timeout in seconds for a single merged CIRR validation job launched by helper scripts.")
     parser.add_argument("--prompt-template", type=str, default="A photo of $ that {instruction}")
     parser.add_argument("--cirr-output-dir", type=str, default="res_cirr",
                         help="Output directory for CIRR test results (default: res_cirr)")
