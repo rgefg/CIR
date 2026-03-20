@@ -455,6 +455,8 @@ def parse_args():
     parser.add_argument("--no-lora", action="store_true", default=False)
     parser.add_argument("--geo-weight", type=float, default=0.0,
                         help="Weight applied to the auxiliary geo branch. Set 0 to disable the geo branch.")
+    parser.add_argument("--geo-start-step", type=int, default=0,
+                        help="Delay auxiliary geo updates until this many retrieval optimizer steps have completed.")
     parser.add_argument("--geo-conflict-projection", action="store_true", default=False,
                         help="Project geo gradients away from conflicting retrieval gradients.")
     parser.add_argument("--geo-reverse-weight", type=float, default=0.25,
