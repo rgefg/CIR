@@ -718,7 +718,6 @@ def train(
     if args.precision == "amp" and geo_optimizer is not None and geo_scaler is None:
         raise ValueError("AMP geo training requires a dedicated geo GradScaler.")
 
-    geo_start_step = max(int(getattr(args, "geo_start_step", 0)), 0)
     geo_rng_state = None
     if geo_text_model is not None and geo_optimizer is not None:
         rank_offset = int(getattr(args, "rank", 0) or 0)
@@ -728,8 +727,6 @@ def train(
             logging.info(
                 f"Geo branch uses an independent torch RNG stream with seed={geo_rng_seed}."
             )
-    if is_master(args) and geo_text_model is not None and geo_optimizer is not None and geo_start_step > 0:
-        logging.info(f"Geo branch updates are delayed until retrieval step {geo_start_step}.")
 
     # handle streaming dataset (num_batches=None)
     num_batches_per_epoch = getattr(dataloader, "num_batches", None)
@@ -766,7 +763,6 @@ def train(
         m = model.module if args.distributed or args.dp else model
         i2t = img2text.module if (args.distributed or args.dp) else img2text
         g = geo_text_model.module if hasattr(geo_text_model, "module") else geo_text_model
-        current_step = num_updates_per_epoch * epoch + update_idx
         loss_stats = None
 
         # ---- CC3M CIR dict batch -> Lcom-only ----
@@ -806,7 +802,7 @@ def train(
                 images = images.cuda(args.gpu, non_blocking=True)
 
             geo_weight = float(getattr(args, "geo_weight", 0.0))
-            geo_enabled = (g is not None) and (geo_weight > 0.0) and (current_step >= geo_start_step)
+            geo_enabled = (g is not None) and (geo_weight > 0.0)
 
             if args.precision == "amp":
                 with autocast():
@@ -929,11 +925,7 @@ def train(
         # optimizer step on accumulation boundary
         if (micro_idx % accum_steps) == 0:
             step = num_updates_per_epoch * epoch + update_idx
-            geo_step_ready = (
-                geo_optimizer is not None
-                and g is not None
-                and step >= geo_start_step
-            )
+            geo_step_ready = geo_optimizer is not None and g is not None
             projection_stats = {}
             if args.precision == "amp":
                 retrieval_scaler.unscale_(optimizer)
@@ -949,7 +941,7 @@ def train(
                 loss_stats.update(projection_stats)
             scheduler(step)
             if geo_scheduler is not None and geo_step_ready:
-                geo_scheduler(step - geo_start_step)
+                geo_scheduler(step)
 
             if args.precision == "amp":
                 retrieval_scaler.step(optimizer)

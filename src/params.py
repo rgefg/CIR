@@ -491,8 +491,6 @@ def parse_args():
                         help="Geo branch GradScaler backoff factor. Defaults to --amp-backoff-factor.")
     parser.add_argument("--geo-amp-growth-interval", type=int, default=None,
                         help="Geo branch GradScaler growth interval. Defaults to --amp-growth-interval.")
-    parser.add_argument("--geo-start-step", type=int, default=0,
-                        help="Delay auxiliary geo updates until this many retrieval optimizer steps have completed.")
     parser.add_argument("--geo-conflict-projection", action="store_true", default=False,
                         help="Project geo gradients away from conflicting retrieval gradients.")
     parser.add_argument("--geo-reverse-weight", type=float, default=0.25,
