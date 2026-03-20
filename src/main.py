@@ -392,9 +392,9 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         if not getattr(args, "no_lora", False):
             apply_lora_to_linear_layers(
                 geo_text_model,
-                r=getattr(args, "lora_r", 64),
-                alpha=getattr(args, "lora_alpha", 16),
-                dropout=getattr(args, "lora_dropout", 0.0),
+                r=getattr(args, "geo_lora_r", 64),
+                alpha=getattr(args, "geo_lora_alpha", 16),
+                dropout=getattr(args, "geo_lora_dropout", 0.0),
             )
         freeze_module_except_lora(geo_text_model)
     
@@ -526,14 +526,14 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     def include(n):
         return not exclude(n)
 
-    def build_param_groups(named_parameters):
+    def build_param_groups(named_parameters, weight_decay):
         gain_or_bias_params = [p for n, p in named_parameters if exclude(n) and p.requires_grad]
         rest_params = [p for n, p in named_parameters if include(n) and p.requires_grad]
         groups = []
         if gain_or_bias_params:
             groups.append({"params": gain_or_bias_params, "weight_decay": 0.0})
         if rest_params:
-            groups.append({"params": rest_params, "weight_decay": args.wd})
+            groups.append({"params": rest_params, "weight_decay": weight_decay})
         return groups
 
     retrieval_named_parameters = []
@@ -544,19 +544,19 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         geo_named_parameters += list((geo_text_model.module if (args.distributed or args.dp) else geo_text_model).named_parameters())
 
     optimizer = optim.AdamW(
-        build_param_groups(retrieval_named_parameters),
+        build_param_groups(retrieval_named_parameters, args.wd),
         lr=args.lr,
         betas=(args.beta1, args.beta2),
         eps=args.eps,
     )
     geo_optimizer = None
-    geo_param_groups = build_param_groups(geo_named_parameters)
+    geo_param_groups = build_param_groups(geo_named_parameters, args.geo_wd)
     if geo_param_groups:
         geo_optimizer = optim.AdamW(
             geo_param_groups,
-            lr=args.lr,
-            betas=(args.beta1, args.beta2),
-            eps=args.eps,
+            lr=args.geo_lr,
+            betas=(args.geo_beta1, args.geo_beta2),
+            eps=args.geo_eps,
         )
 
     # ---- Scheduler ----
@@ -565,12 +565,34 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         nb = getattr(args, "wds_epoch_steps", 100000)
     total_steps = nb * args.epochs
     scheduler = cosine_lr(optimizer, args.lr, args.warmup, total_steps)
-    geo_scheduler = cosine_lr(geo_optimizer, args.lr, args.warmup, total_steps) if geo_optimizer is not None else None
+    geo_scheduler = (
+        cosine_lr(geo_optimizer, args.geo_lr, args.geo_warmup, total_steps)
+        if geo_optimizer is not None
+        else None
+    )
 
     # Keep AMP state fully separated so geo overflows/backoff cannot perturb
     # retrieval branch scaling behavior.
-    retrieval_scaler = GradScaler() if args.precision == "amp" else None
-    geo_scaler = GradScaler() if (args.precision == "amp" and geo_optimizer is not None) else None
+    retrieval_scaler = (
+        GradScaler(
+            init_scale=float(args.amp_init_scale),
+            growth_factor=float(args.amp_growth_factor),
+            backoff_factor=float(args.amp_backoff_factor),
+            growth_interval=int(args.amp_growth_interval),
+        )
+        if args.precision == "amp"
+        else None
+    )
+    geo_scaler = (
+        GradScaler(
+            init_scale=float(args.geo_amp_init_scale),
+            growth_factor=float(args.geo_amp_growth_factor),
+            backoff_factor=float(args.geo_amp_backoff_factor),
+            growth_interval=int(args.geo_amp_growth_interval),
+        )
+        if (args.precision == "amp" and geo_optimizer is not None)
+        else None
+    )
 
     # Resume Logic (Training Resume, not Pretrain Load)
     start_epoch = 0

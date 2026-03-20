@@ -440,6 +440,14 @@ def parse_args():
     parser.add_argument("--lora-r", type=int, default=64)
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--lora-dropout", type=float, default=0.0)
+    parser.add_argument("--amp-init-scale", type=float, default=65536.0,
+                        help="GradScaler init scale for the retrieval branch.")
+    parser.add_argument("--amp-growth-factor", type=float, default=2.0,
+                        help="GradScaler growth factor for the retrieval branch.")
+    parser.add_argument("--amp-backoff-factor", type=float, default=0.5,
+                        help="GradScaler backoff factor for the retrieval branch.")
+    parser.add_argument("--amp-growth-interval", type=int, default=2000,
+                        help="GradScaler growth interval for the retrieval branch.")
     parser.add_argument("--reset-logit-scale", action="store_true", default=False,
                         help="Reset logit_scale to standard CLIP value (log(1/0.07) ≈ 2.659) at start of training.")
     parser.add_argument("--freeze-logit-scale", action="store_true", default=False,
@@ -455,6 +463,34 @@ def parse_args():
     parser.add_argument("--no-lora", action="store_true", default=False)
     parser.add_argument("--geo-weight", type=float, default=0.0,
                         help="Weight applied to the auxiliary geo branch. Set 0 to disable the geo branch.")
+    parser.add_argument("--geo-seed", type=int, default=None,
+                        help="Optional dedicated seed for the geo branch RNG stream. Defaults to --seed.")
+    parser.add_argument("--geo-lr", type=float, default=None,
+                        help="Geo branch learning rate. Defaults to --lr.")
+    parser.add_argument("--geo-beta1", type=float, default=None,
+                        help="Geo branch Adam beta1. Defaults to --beta1.")
+    parser.add_argument("--geo-beta2", type=float, default=None,
+                        help="Geo branch Adam beta2. Defaults to --beta2.")
+    parser.add_argument("--geo-eps", type=float, default=None,
+                        help="Geo branch Adam epsilon. Defaults to --eps.")
+    parser.add_argument("--geo-wd", type=float, default=None,
+                        help="Geo branch weight decay. Defaults to --wd.")
+    parser.add_argument("--geo-warmup", type=int, default=None,
+                        help="Geo branch warmup steps. Defaults to --warmup.")
+    parser.add_argument("--geo-lora-r", type=int, default=None,
+                        help="Geo branch LoRA rank. Defaults to --lora-r.")
+    parser.add_argument("--geo-lora-alpha", type=int, default=None,
+                        help="Geo branch LoRA alpha. Defaults to --lora-alpha.")
+    parser.add_argument("--geo-lora-dropout", type=float, default=None,
+                        help="Geo branch LoRA dropout. Defaults to --lora-dropout.")
+    parser.add_argument("--geo-amp-init-scale", type=float, default=None,
+                        help="Geo branch GradScaler init scale. Defaults to --amp-init-scale.")
+    parser.add_argument("--geo-amp-growth-factor", type=float, default=None,
+                        help="Geo branch GradScaler growth factor. Defaults to --amp-growth-factor.")
+    parser.add_argument("--geo-amp-backoff-factor", type=float, default=None,
+                        help="Geo branch GradScaler backoff factor. Defaults to --amp-backoff-factor.")
+    parser.add_argument("--geo-amp-growth-interval", type=int, default=None,
+                        help="Geo branch GradScaler growth interval. Defaults to --amp-growth-interval.")
     parser.add_argument("--geo-start-step", type=int, default=0,
                         help="Delay auxiliary geo updates until this many retrieval optimizer steps have completed.")
     parser.add_argument("--geo-conflict-projection", action="store_true", default=False,
@@ -496,6 +532,26 @@ def parse_args():
     # If some params are not passed, we use the default values based on model name.
     default_params = get_default_params(args.model)
     for name, val in default_params.items():
+        if getattr(args, name) is None:
+            setattr(args, name, val)
+
+    geo_fallbacks = {
+        "geo_seed": args.seed,
+        "geo_lr": args.lr,
+        "geo_beta1": args.beta1,
+        "geo_beta2": args.beta2,
+        "geo_eps": args.eps,
+        "geo_wd": args.wd,
+        "geo_warmup": args.warmup,
+        "geo_lora_r": args.lora_r,
+        "geo_lora_alpha": args.lora_alpha,
+        "geo_lora_dropout": args.lora_dropout,
+        "geo_amp_init_scale": args.amp_init_scale,
+        "geo_amp_growth_factor": args.amp_growth_factor,
+        "geo_amp_backoff_factor": args.amp_backoff_factor,
+        "geo_amp_growth_interval": args.amp_growth_interval,
+    }
+    for name, val in geo_fallbacks.items():
         if getattr(args, name) is None:
             setattr(args, name, val)
 

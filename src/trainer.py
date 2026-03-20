@@ -6,7 +6,7 @@ import os
 import time
 import re
 import random
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -634,16 +634,52 @@ def project_geo_gradients(retrieval_model, geo_text_model):
     }
 
 
-def _geo_rng_context(args, enabled):
-    if not enabled:
-        return nullcontext()
-    cuda_devices = []
-    if torch.cuda.is_available():
-        if getattr(args, "gpu", None) is not None:
-            cuda_devices = [int(args.gpu)]
-        else:
-            cuda_devices = [torch.cuda.current_device()]
-    return torch.random.fork_rng(devices=cuda_devices, enabled=True)
+def _branch_cuda_devices(args):
+    if not torch.cuda.is_available():
+        return []
+    if getattr(args, "gpu", None) is not None:
+        return [int(args.gpu)]
+    return [torch.cuda.current_device()]
+
+
+class _TorchBranchRNGState:
+    def __init__(self, seed, cuda_devices):
+        self.seed = int(seed)
+        self.cuda_devices = list(cuda_devices)
+        with torch.random.fork_rng(devices=self.cuda_devices, enabled=True):
+            torch.manual_seed(self.seed)
+            if self.cuda_devices:
+                torch.cuda.manual_seed_all(self.seed)
+            self.cpu_state = torch.random.get_rng_state()
+            self.cuda_states = {
+                device: torch.cuda.get_rng_state(device) for device in self.cuda_devices
+            }
+
+
+@contextmanager
+def _geo_rng_context(branch_rng_state, enabled):
+    if (not enabled) or (branch_rng_state is None):
+        yield
+        return
+
+    saved_cpu_state = torch.random.get_rng_state()
+    saved_cuda_states = {
+        device: torch.cuda.get_rng_state(device) for device in branch_rng_state.cuda_devices
+    }
+    torch.random.set_rng_state(branch_rng_state.cpu_state)
+    for device, state in branch_rng_state.cuda_states.items():
+        torch.cuda.set_rng_state(state, device)
+
+    try:
+        yield
+    finally:
+        branch_rng_state.cpu_state = torch.random.get_rng_state()
+        branch_rng_state.cuda_states = {
+            device: torch.cuda.get_rng_state(device) for device in branch_rng_state.cuda_devices
+        }
+        torch.random.set_rng_state(saved_cpu_state)
+        for device, state in saved_cuda_states.items():
+            torch.cuda.set_rng_state(state, device)
 
 
 def train(
@@ -683,6 +719,15 @@ def train(
         raise ValueError("AMP geo training requires a dedicated geo GradScaler.")
 
     geo_start_step = max(int(getattr(args, "geo_start_step", 0)), 0)
+    geo_rng_state = None
+    if geo_text_model is not None and geo_optimizer is not None:
+        rank_offset = int(getattr(args, "rank", 0) or 0)
+        geo_rng_seed = int(getattr(args, "geo_seed", getattr(args, "seed", 0))) + rank_offset
+        geo_rng_state = _TorchBranchRNGState(geo_rng_seed, _branch_cuda_devices(args))
+        if is_master(args):
+            logging.info(
+                f"Geo branch uses an independent torch RNG stream with seed={geo_rng_seed}."
+            )
     if is_master(args) and geo_text_model is not None and geo_optimizer is not None and geo_start_step > 0:
         logging.info(f"Geo branch updates are delayed until retrieval step {geo_start_step}.")
 
@@ -777,7 +822,7 @@ def train(
                     total_loss = retrieval_loss / float(accum_steps)
                 retrieval_scaler.scale(total_loss).backward()
                 if geo_enabled:
-                    with _geo_rng_context(args, enabled=True):
+                    with _geo_rng_context(geo_rng_state, enabled=True):
                         with autocast():
                             geo_loss, geo_stats = get_loss_geo_text_branch(
                                 g,
@@ -809,7 +854,7 @@ def train(
                 )
                 (retrieval_loss / float(accum_steps)).backward()
                 if geo_enabled:
-                    with _geo_rng_context(args, enabled=True):
+                    with _geo_rng_context(geo_rng_state, enabled=True):
                         geo_loss, geo_stats = get_loss_geo_text_branch(
                             g,
                             src_captions,
@@ -954,6 +999,8 @@ def train(
                     f"Loss: {(total_loss.detach().item() * float(accum_steps)):.6f}\tData (t) {data_time:.3f}\tBatch (t) {batch_time:.3f}"
                 f"\tLR: {optimizer.param_groups[0]['lr']:5f}\tlogit_scale {m.logit_scale.data:.3f} (exp={logit_scale_exp:.3f})"
                 )
+                if geo_optimizer is not None:
+                    log_msg += f"\tgeo_LR: {geo_optimizer.param_groups[0]['lr']:5f}"
                 if loss_stats is not None:
                     if "loss_retrieval" in loss_stats:
                         log_msg += f"\tloss_retrieval: {loss_stats['loss_retrieval']:.4f}"
