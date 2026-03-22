@@ -72,6 +72,39 @@ class LoRALinear(nn.Module):
         return self.base.bias
 
 
+def _clone_module_without_lora(module: nn.Module) -> nn.Module:
+    cloned = copy.deepcopy(module)
+    for name, child in list(cloned.named_children()):
+        if isinstance(child, LoRALinear):
+            setattr(cloned, name, copy.deepcopy(child.base))
+        else:
+            setattr(cloned, name, _clone_module_without_lora(child))
+    return cloned
+
+
+def _copy_module_base_weights(dst_module: nn.Module, src_module: nn.Module):
+    if isinstance(dst_module, LoRALinear):
+        dst_module = dst_module.base
+    if isinstance(src_module, LoRALinear):
+        src_module = src_module.base
+
+    dst_children = dict(dst_module.named_children())
+    src_children = dict(src_module.named_children())
+
+    if not dst_children and not src_children:
+        dst_module.load_state_dict(src_module.state_dict(), strict=True)
+        return
+
+    if set(dst_children.keys()) != set(src_children.keys()):
+        raise RuntimeError(
+            f"Text branch structure mismatch while copying base weights: "
+            f"dst={sorted(dst_children.keys())} src={sorted(src_children.keys())}"
+        )
+
+    for name in dst_children.keys():
+        _copy_module_base_weights(dst_children[name], src_children[name])
+
+
 def apply_lora_to_linear_layers(module: nn.Module, r: int, alpha: int, dropout: float = 0.0):
     for name, child in list(module.named_children()):
         if isinstance(child, LoRALinear):
@@ -117,10 +150,10 @@ class TextEncoderBranch(nn.Module):
     def __init__(self, clip_model: nn.Module):
         super().__init__()
         base = clip_model.module if hasattr(clip_model, "module") else clip_model
-        self.transformer = copy.deepcopy(base.transformer)
-        self.token_embedding = copy.deepcopy(base.token_embedding)
+        self.transformer = _clone_module_without_lora(base.transformer)
+        self.token_embedding = _clone_module_without_lora(base.token_embedding)
         self.positional_embedding = nn.Parameter(base.positional_embedding.detach().clone())
-        self.ln_final = copy.deepcopy(base.ln_final)
+        self.ln_final = _clone_module_without_lora(base.ln_final)
         self.text_projection = nn.Parameter(base.text_projection.detach().clone())
         self.end_id = int(base.end_id)
 
@@ -145,9 +178,9 @@ def copy_text_branch_weights_from_clip(text_branch: nn.Module, clip_model: nn.Mo
     branch = text_branch.module if hasattr(text_branch, "module") else text_branch
     base = clip_model.module if hasattr(clip_model, "module") else clip_model
 
-    branch.transformer.load_state_dict(base.transformer.state_dict(), strict=True)
-    branch.token_embedding.load_state_dict(base.token_embedding.state_dict(), strict=True)
-    branch.ln_final.load_state_dict(base.ln_final.state_dict(), strict=True)
+    _copy_module_base_weights(branch.transformer, base.transformer)
+    _copy_module_base_weights(branch.token_embedding, base.token_embedding)
+    _copy_module_base_weights(branch.ln_final, base.ln_final)
     with torch.no_grad():
         branch.positional_embedding.copy_(base.positional_embedding.detach())
         branch.text_projection.copy_(base.text_projection.detach())

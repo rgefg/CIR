@@ -497,6 +497,8 @@ def parse_args():
                         help="Weight for the soft reverse-instruction consistency term in the geo branch.")
     parser.add_argument("--geo-reverse-margin", type=float, default=0.0,
                         help="Penalize geo forward/reverse cosine values above -margin; 0 only penalizes positive cosine.")
+    parser.add_argument("--geo-zero-loss-weight", type=float, default=0.0,
+                        help="Optional weight for the strong zero-style regularizer ||z_fwd + z_rev|| in the geo branch.")
     parser.add_argument("--geo-embed-norm-eps", type=float, default=1e-6,
                         help="Epsilon used when normalizing geo text embeddings.")
     parser.add_argument("--geo-delta-norm-eps", type=float, default=1e-4,

@@ -533,28 +533,34 @@ def get_loss_geo_text_branch(
     valid_count = int(valid_mask.sum().item())
     reverse_weight = float(getattr(args, "geo_reverse_weight", 0.25))
     reverse_margin = float(getattr(args, "geo_reverse_margin", 0.0))
+    zero_loss_weight = float(getattr(args, "geo_zero_loss_weight", 0.0))
 
     if valid_count > 0:
         valid_fwd_align = fwd_align[valid_mask]
         valid_rev_align = rev_align[valid_mask]
         valid_fwd_rev_cos = fwd_rev_cos[valid_mask]
+        valid_zero_residual = torch.norm((z_fwd + z_rev)[valid_mask], dim=-1)
 
         loss_fwd = (1.0 - valid_fwd_align).mean()
         loss_rev = (1.0 - valid_rev_align).mean()
         loss_reverse = F.relu(valid_fwd_rev_cos + reverse_margin).mean()
-        geom_loss = loss_fwd + loss_rev + (reverse_weight * loss_reverse)
+        loss_zero = valid_zero_residual.mean()
+        geom_loss = loss_fwd + loss_rev + (reverse_weight * loss_reverse) + (zero_loss_weight * loss_zero)
 
         mean_fwd_align = float(valid_fwd_align.mean().detach().item())
         mean_rev_align = float(valid_rev_align.mean().detach().item())
         mean_fwd_rev_cos = float(valid_fwd_rev_cos.mean().detach().item())
+        mean_zero_residual = float(valid_zero_residual.mean().detach().item())
     else:
         geom_loss = (z_src.sum() + z_tgt.sum() + z_fwd.sum() + z_rev.sum()) * 0.0
         loss_fwd = geom_loss.detach()
         loss_rev = geom_loss.detach()
         loss_reverse = geom_loss.detach()
+        loss_zero = geom_loss.detach()
         mean_fwd_align = 0.0
         mean_rev_align = 0.0
         mean_fwd_rev_cos = 0.0
+        mean_zero_residual = 0.0
 
     valid_ratio = float(valid_mask.float().mean().detach().item()) if len(ctgt) > 0 else 0.0
     missing_src_ratio = float((~has_src).float().mean().detach().item()) if len(ctgt) > 0 else 0.0
@@ -565,10 +571,12 @@ def get_loss_geo_text_branch(
         "loss_fwd": float(loss_fwd.detach().item()),
         "loss_rev": float(loss_rev.detach().item()),
         "loss_reverse_consistency": float(loss_reverse.detach().item()),
+        "loss_zero_regularizer": float(loss_zero.detach().item()),
         "loss_geom_total": float(geom_loss.detach().item()),
         "z_fwd_align": mean_fwd_align,
         "z_rev_align": mean_rev_align,
         "z_fwd_rev_cos": mean_fwd_rev_cos,
+        "z_fwd_rev_zero_norm": mean_zero_residual,
         "geo_valid_ratio": valid_ratio,
         "geo_valid_count": valid_count,
         "geo_missing_src_ratio": missing_src_ratio,
