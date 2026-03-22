@@ -18,11 +18,16 @@ PIC2WORD_CKPT="${PIC2WORD_CKPT:-/data2/mingyu/composed_image_retrieval/checkpoin
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-56}"
 TRAIN_ACCUM_STEPS="${TRAIN_ACCUM_STEPS:-8}"
+TRAIN_WORKERS="${TRAIN_WORKERS:-2}"
 TRAIN_EPOCH_STEPS="${TRAIN_EPOCH_STEPS:-300}"
 WARMUP_STEPS="${WARMUP_STEPS:-200}"
 SAVE_STEP_INTERVAL="${SAVE_STEP_INTERVAL:-50}"
 SAVE_STEP_START="${SAVE_STEP_START:-50}"
 SAVE_STEP_END="${SAVE_STEP_END:-300}"
+LOG_INTERVAL="${LOG_INTERVAL:-100}"
+CIRR_VAL_EVAL_EVERY="${CIRR_VAL_EVAL_EVERY:-${SAVE_STEP_INTERVAL}}"
+WDS_SHUFFLE="${WDS_SHUFFLE:-10000}"
+WDS_SHARDSHUFFLE="${WDS_SHARDSHUFFLE:-1000}"
 SEED="${SEED:-3407}"
 ENABLE_WDS_DETERMINISTIC="${ENABLE_WDS_DETERMINISTIC:-0}"
 ENABLE_DETERMINISTIC_TRAIN="${ENABLE_DETERMINISTIC_TRAIN:-0}"
@@ -97,7 +102,10 @@ echo "Base retrieval JSON: ${TRAIN_JSON}"
 echo "Reverse sidecar JSON: ${REVERSE_JSON}"
 echo "Train batch size per GPU: ${TRAIN_BATCH_SIZE}"
 echo "Accumulation steps: ${TRAIN_ACCUM_STEPS}"
+echo "Train workers: ${TRAIN_WORKERS}"
 echo "Warmup steps: ${WARMUP_STEPS}"
+echo "WDS shuffle: samples=${WDS_SHUFFLE}, shards=${WDS_SHARDSHUFFLE}"
+echo "CIRR val every: ${CIRR_VAL_EVAL_EVERY}"
 echo "Seed: ${SEED}"
 echo "Retrieval optim: lr=${LR}, wd=${WD}, betas=(${BETA1}, ${BETA2}), eps=${EPS}"
 echo "Retrieval LoRA: r=${LORA_R}, alpha=${LORA_ALPHA}, dropout=${LORA_DROPOUT}"
@@ -158,8 +166,8 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \
   --train-data "dummy" \
   --wds-shards "${WDS_SHARDS}" \
   --wds-epoch-steps "${TRAIN_EPOCH_STEPS}" \
-  --wds-shuffle 10000 \
-  --wds-shardshuffle 1000 \
+  --wds-shuffle "${WDS_SHUFFLE}" \
+  --wds-shardshuffle "${WDS_SHARDSHUFFLE}" \
   --model ViT-L/14 \
   --pic2word-pretrained "${PIC2WORD_CKPT}" \
   --batch-size "${TRAIN_BATCH_SIZE}" \
@@ -177,7 +185,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \
   --amp-growth-factor "${AMP_GROWTH_FACTOR}" \
   --amp-backoff-factor "${AMP_BACKOFF_FACTOR}" \
   --amp-growth-interval "${AMP_GROWTH_INTERVAL}" \
-  --workers 2 \
+  --workers "${TRAIN_WORKERS}" \
   --lora-r "${LORA_R}" \
   --lora-alpha "${LORA_ALPHA}" \
   --lora-dropout "${LORA_DROPOUT}" \
@@ -189,8 +197,8 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \
   --save-step-start "${SAVE_STEP_START}" \
   --save-step-end "${SAVE_STEP_END}" \
   --save-step-interval "${SAVE_STEP_INTERVAL}" \
-  --log-interval 100 \
-  --cirr-val-eval-every "${SAVE_STEP_INTERVAL}" \
+  --log-interval "${LOG_INTERVAL}" \
+  --cirr-val-eval-every "${CIRR_VAL_EVAL_EVERY}" \
   --geo-weight "${GEO_WEIGHT}" \
   --geo-seed "${GEO_SEED}" \
   --geo-lr "${GEO_LR}" \
