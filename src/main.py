@@ -26,7 +26,7 @@ from trainer import train
 from data import get_data, CIRR
 from params import parse_args, get_project_root
 from logger import setup_primary_logging, setup_worker_logging
-from utils import is_master, convert_models_to_fp32
+from utils import is_master, convert_models_to_fp32, ModuleParamEMA, use_ema_weights
 
 import math
 import torch.nn as nn
@@ -627,6 +627,17 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         else None
     )
 
+    retrieval_model_ema = None
+    img2text_ema = None
+    geo_text_ema = None
+    if float(getattr(args, "retrieval_ema_decay", 0.0)) > 0.0:
+        retrieval_model_ema = ModuleParamEMA(model, args.retrieval_ema_decay)
+        img2text_ema = ModuleParamEMA(img2text, args.retrieval_ema_decay)
+        logging.info(f"Enabled retrieval EMA with decay={args.retrieval_ema_decay}.")
+    if geo_text_model is not None and float(getattr(args, "geo_ema_decay", 0.0)) > 0.0:
+        geo_text_ema = ModuleParamEMA(geo_text_model, args.geo_ema_decay)
+        logging.info(f"Enabled geo EMA with decay={args.geo_ema_decay}.")
+
     # Resume Logic (Training Resume, not Pretrain Load)
     start_epoch = 0
     if args.resume == "auto":
@@ -682,6 +693,12 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                 logging.warning(
                     "Skipping legacy combined optimizer state for geo branch because retrieval/geo optimizers are now split."
                 )
+            if retrieval_model_ema is not None:
+                retrieval_model_ema.load_state_dict(checkpoint.get("ema_retrieval_model"), model)
+            if img2text_ema is not None:
+                img2text_ema.load_state_dict(checkpoint.get("ema_img2text"), img2text)
+            if geo_text_ema is not None:
+                geo_text_ema.load_state_dict(checkpoint.get("ema_geo_text"), geo_text_model)
             logging.info(f"=> loaded RESUME checkpoint '{args.resume}' (epoch {checkpoint['epoch']})")
         else:
             logging.info(f"=> no checkpoint found at '{args.resume}'")
@@ -722,22 +739,35 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             geo_optimizer=geo_optimizer,
             geo_scheduler=geo_scheduler,
             geo_scaler=geo_scaler,
+            retrieval_model_ema=retrieval_model_ema,
+            img2text_ema=img2text_ema,
+            geo_text_ema=geo_text_ema,
         )
         if args.save_logs and (args.gpu == 0 or (not args.distributed)):
+            ema_pairs = [
+                (model, retrieval_model_ema),
+                (img2text, img2text_ema),
+                (geo_text_model, geo_text_ema),
+            ]
+
+            def _build_checkpoint_payload(epoch_to_save):
+                return {
+                    "epoch": epoch_to_save,
+                    "name": args.name,
+                    "state_dict": model.state_dict(),
+                    "state_dict_img2text": img2text.state_dict(),
+                    "state_dict_geo_text": geo_text_model.state_dict() if geo_text_model is not None else None,
+                    "optimizer": optimizer.state_dict(),
+                    "optimizer_retrieval": optimizer.state_dict(),
+                    "optimizer_geo": geo_optimizer.state_dict() if geo_optimizer is not None else None,
+                    "ema_retrieval_model": retrieval_model_ema.state_dict() if retrieval_model_ema is not None else None,
+                    "ema_img2text": img2text_ema.state_dict() if img2text_ema is not None else None,
+                    "ema_geo_text": geo_text_ema.state_dict() if geo_text_ema is not None else None,
+                }
+
             if (epoch + 1) == args.epochs or (args.save_frequency > 0 and ((epoch + 1) % args.save_frequency) == 0):
-                torch.save(
-                    {
-                        "epoch": epoch + 1,
-                        "name": args.name,
-                        "state_dict": model.state_dict(),
-                        "state_dict_img2text": img2text.state_dict(),
-                        "state_dict_geo_text": geo_text_model.state_dict() if geo_text_model is not None else None,
-                        "optimizer": optimizer.state_dict(),
-                        "optimizer_retrieval": optimizer.state_dict(),
-                        "optimizer_geo": geo_optimizer.state_dict() if geo_optimizer is not None else None,
-                    },
-                    os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt"),
-                )
+                raw_payload = _build_checkpoint_payload(epoch + 1)
+                torch.save(raw_payload, os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}.pt"))
                 if geo_text_model is not None:
                     geo_lora_state_dict = get_lora_state_dict(geo_text_model, text_only=False)
                     if geo_lora_state_dict:
@@ -746,6 +776,24 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                         logging.info(
                             f"Saved geo LoRA-only weights ({len(geo_lora_state_dict)} params) to {geo_lora_path}"
                         )
+                if args.ema_save_checkpoints and any(ema is not None for _, ema in ema_pairs):
+                    ema_ckpt_path = os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}_ema.pt")
+                    with use_ema_weights(ema_pairs):
+                        ema_payload = _build_checkpoint_payload(epoch + 1)
+                        ema_payload["optimizer"] = None
+                        ema_payload["optimizer_retrieval"] = None
+                        ema_payload["optimizer_geo"] = None
+                        ema_payload["ema_checkpoint"] = True
+                        torch.save(ema_payload, ema_ckpt_path)
+                        if geo_text_model is not None and geo_text_ema is not None:
+                            geo_lora_ema = get_lora_state_dict(geo_text_model, text_only=False)
+                            if geo_lora_ema:
+                                geo_lora_ema_path = os.path.join(args.checkpoint_path, f"epoch_{epoch + 1}_geo_lora_ema.pt")
+                                torch.save(geo_lora_ema, geo_lora_ema_path)
+                                logging.info(
+                                    f"Saved geo EMA LoRA-only weights ({len(geo_lora_ema)} params) to {geo_lora_ema_path}"
+                                )
+                    logging.info(f"Saved EMA checkpoint to {ema_ckpt_path}")
     
     if args.wandb and (args.gpu == 0 or (not args.distributed)):
         wandb.finish()

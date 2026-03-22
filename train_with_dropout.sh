@@ -5,8 +5,8 @@ export PYTHONPATH="/data2/mingyu/composed_image_retrieval:/data2/mingyu/composed
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 DIST_URL="${DIST_URL:-tcp://127.0.0.1:6144}"
-TRAIN_CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-6,7}"
-RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_Mission300_CurrentLoss}"
+TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-6,7}}"
+RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1700_CurrentLoss}"
 EVAL_GPU="${EVAL_GPU:-2}"
 
 TRAIN_JSON="${TRAIN_JSON:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2_with_reverse.jsonl}"
@@ -19,11 +19,11 @@ PIC2WORD_CKPT="${PIC2WORD_CKPT:-/data2/mingyu/composed_image_retrieval/checkpoin
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-56}"
 TRAIN_ACCUM_STEPS="${TRAIN_ACCUM_STEPS:-8}"
 TRAIN_WORKERS="${TRAIN_WORKERS:-2}"
-TRAIN_EPOCH_STEPS="${TRAIN_EPOCH_STEPS:-300}"
+TRAIN_EPOCH_STEPS="${TRAIN_EPOCH_STEPS:-1700}"
 WARMUP_STEPS="${WARMUP_STEPS:-200}"
-SAVE_STEP_INTERVAL="${SAVE_STEP_INTERVAL:-50}"
-SAVE_STEP_START="${SAVE_STEP_START:-50}"
-SAVE_STEP_END="${SAVE_STEP_END:-300}"
+SAVE_STEP_INTERVAL="${SAVE_STEP_INTERVAL:-200}"
+SAVE_STEP_START="${SAVE_STEP_START:-200}"
+SAVE_STEP_END="${SAVE_STEP_END:-1700}"
 LOG_INTERVAL="${LOG_INTERVAL:-100}"
 CIRR_VAL_EVAL_EVERY="${CIRR_VAL_EVAL_EVERY:-${SAVE_STEP_INTERVAL}}"
 WDS_SHUFFLE="${WDS_SHUFFLE:-10000}"
@@ -45,6 +45,7 @@ AMP_INIT_SCALE="${AMP_INIT_SCALE:-65536}"
 AMP_GROWTH_FACTOR="${AMP_GROWTH_FACTOR:-2.0}"
 AMP_BACKOFF_FACTOR="${AMP_BACKOFF_FACTOR:-0.5}"
 AMP_GROWTH_INTERVAL="${AMP_GROWTH_INTERVAL:-2000}"
+RETRIEVAL_EMA_DECAY="${RETRIEVAL_EMA_DECAY:-0.999}"
 
 GEO_WEIGHT="${GEO_WEIGHT:-1.0}"
 GEO_SEED="${GEO_SEED:-${SEED}}"
@@ -61,6 +62,7 @@ GEO_AMP_INIT_SCALE="${GEO_AMP_INIT_SCALE:-${AMP_INIT_SCALE}}"
 GEO_AMP_GROWTH_FACTOR="${GEO_AMP_GROWTH_FACTOR:-${AMP_GROWTH_FACTOR}}"
 GEO_AMP_BACKOFF_FACTOR="${GEO_AMP_BACKOFF_FACTOR:-${AMP_BACKOFF_FACTOR}}"
 GEO_AMP_GROWTH_INTERVAL="${GEO_AMP_GROWTH_INTERVAL:-${AMP_GROWTH_INTERVAL}}"
+GEO_EMA_DECAY="${GEO_EMA_DECAY:-${RETRIEVAL_EMA_DECAY}}"
 ENABLE_GEO_CONFLICT_PROJECTION="${ENABLE_GEO_CONFLICT_PROJECTION:-1}"
 GEO_REVERSE_WEIGHT="${GEO_REVERSE_WEIGHT:-0.25}"
 GEO_REVERSE_MARGIN="${GEO_REVERSE_MARGIN:-0.0}"
@@ -68,6 +70,8 @@ GEO_ZERO_LOSS_WEIGHT="${GEO_ZERO_LOSS_WEIGHT:-0.0}"
 GEO_EMBED_NORM_EPS="${GEO_EMBED_NORM_EPS:-1e-6}"
 GEO_DELTA_NORM_EPS="${GEO_DELTA_NORM_EPS:-1e-4}"
 GEO_DELTA_MIN_NORM="${GEO_DELTA_MIN_NORM:-1e-3}"
+ENABLE_EMA_EVAL="${ENABLE_EMA_EVAL:-1}"
+ENABLE_EMA_SAVE_CHECKPOINTS="${ENABLE_EMA_SAVE_CHECKPOINTS:-1}"
 
 MERGE_RETRIEVAL_WEIGHT="${MERGE_RETRIEVAL_WEIGHT:-0.5}"
 MERGE_GEO_WEIGHT="${MERGE_GEO_WEIGHT:-0.5}"
@@ -110,6 +114,7 @@ echo "Seed: ${SEED}"
 echo "Retrieval optim: lr=${LR}, wd=${WD}, betas=(${BETA1}, ${BETA2}), eps=${EPS}"
 echo "Retrieval LoRA: r=${LORA_R}, alpha=${LORA_ALPHA}, dropout=${LORA_DROPOUT}"
 echo "Retrieval AMP: init_scale=${AMP_INIT_SCALE}, growth=${AMP_GROWTH_FACTOR}, backoff=${AMP_BACKOFF_FACTOR}, interval=${AMP_GROWTH_INTERVAL}"
+echo "Retrieval EMA decay: ${RETRIEVAL_EMA_DECAY}"
 echo "Deterministic WDS: ${ENABLE_WDS_DETERMINISTIC}"
 echo "Deterministic cuDNN: ${ENABLE_DETERMINISTIC_TRAIN}"
 echo "Geo weight: ${GEO_WEIGHT}"
@@ -117,12 +122,15 @@ echo "Geo seed: ${GEO_SEED}"
 echo "Geo optim: lr=${GEO_LR}, wd=${GEO_WD}, betas=(${GEO_BETA1}, ${GEO_BETA2}), eps=${GEO_EPS}, warmup=${GEO_WARMUP_STEPS}"
 echo "Geo LoRA: r=${GEO_LORA_R}, alpha=${GEO_LORA_ALPHA}, dropout=${GEO_LORA_DROPOUT}"
 echo "Geo AMP: init_scale=${GEO_AMP_INIT_SCALE}, growth=${GEO_AMP_GROWTH_FACTOR}, backoff=${GEO_AMP_BACKOFF_FACTOR}, interval=${GEO_AMP_GROWTH_INTERVAL}"
+echo "Geo EMA decay: ${GEO_EMA_DECAY}"
+echo "EMA eval: ${ENABLE_EMA_EVAL}"
+echo "EMA save checkpoints: ${ENABLE_EMA_SAVE_CHECKPOINTS}"
 echo "Geo zero-loss weight: ${GEO_ZERO_LOSS_WEIGHT}"
 echo "Geo norm eps: embed=${GEO_EMBED_NORM_EPS}, delta=${GEO_DELTA_NORM_EPS}, min_delta=${GEO_DELTA_MIN_NORM}"
 echo "Watcher isolation: affinity=${WATCHER_CPU_AFFINITY}, nice=${WATCHER_NICE}, cpu_threads=${WATCHER_CPU_THREADS}, eval_workers=${WATCHER_EVAL_WORKERS}"
 
 echo "Step save interval: ${SAVE_STEP_INTERVAL}"
-echo "If OOM: lower TRAIN_BATCH_SIZE in this order: 56 -> 52 -> 48 -> 44, and keep TRAIN_ACCUM_STEPS >= 8."
+echo "If OOM: lower TRAIN_BATCH_SIZE in this order: 56 -> 52 -> 48 -> 44, and keep effective contrastive batch reasonably large."
 
 if [[ "${ENABLE_PARALLEL_MERGE_EVAL}" == "1" && "${GEO_WEIGHT}" != "0" && "${GEO_WEIGHT}" != "0.0" ]]; then
   python data/watch_cirr_parallel_merge_eval.py \
@@ -158,6 +166,12 @@ fi
 if [[ "${ENABLE_DETERMINISTIC_TRAIN}" == "1" ]]; then
   EXTRA_ARGS+=(--deterministic-train)
 fi
+if [[ "${ENABLE_EMA_EVAL}" == "1" ]]; then
+  EXTRA_ARGS+=(--ema-eval)
+fi
+if [[ "${ENABLE_EMA_SAVE_CHECKPOINTS}" == "1" ]]; then
+  EXTRA_ARGS+=(--ema-save-checkpoints)
+fi
 
 CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \
   --name "${RUN_NAME}" \
@@ -185,6 +199,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \
   --amp-growth-factor "${AMP_GROWTH_FACTOR}" \
   --amp-backoff-factor "${AMP_BACKOFF_FACTOR}" \
   --amp-growth-interval "${AMP_GROWTH_INTERVAL}" \
+  --retrieval-ema-decay "${RETRIEVAL_EMA_DECAY}" \
   --workers "${TRAIN_WORKERS}" \
   --lora-r "${LORA_R}" \
   --lora-alpha "${LORA_ALPHA}" \
@@ -214,6 +229,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \
   --geo-amp-growth-factor "${GEO_AMP_GROWTH_FACTOR}" \
   --geo-amp-backoff-factor "${GEO_AMP_BACKOFF_FACTOR}" \
   --geo-amp-growth-interval "${GEO_AMP_GROWTH_INTERVAL}" \
+  --geo-ema-decay "${GEO_EMA_DECAY}" \
   --geo-reverse-weight "${GEO_REVERSE_WEIGHT}" \
   --geo-reverse-margin "${GEO_REVERSE_MARGIN}" \
   --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}" \

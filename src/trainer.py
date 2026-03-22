@@ -18,7 +18,7 @@ import json
 from torch.cuda.amp import autocast
 from third_party.open_clip.clip import tokenize
 from eval_utils import evaluate_cirr
-from utils import is_master
+from utils import is_master, use_ema_weights
 
 
 SAFE_TOKENS = {
@@ -704,6 +704,9 @@ def train(
     geo_optimizer=None,
     geo_scheduler=None,
     geo_scaler=None,
+    retrieval_model_ema=None,
+    img2text_ema=None,
+    geo_text_ema=None,
 ):
     os.environ["WDS_EPOCH"] = str(epoch)
 
@@ -735,6 +738,16 @@ def train(
             logging.info(
                 f"Geo branch uses an independent torch RNG stream with seed={geo_rng_seed}."
             )
+
+    ema_pairs = [
+        (model, retrieval_model_ema),
+        (img2text, img2text_ema),
+        (geo_text_model, geo_text_ema),
+    ]
+    ema_enabled = any(ema is not None for _, ema in ema_pairs)
+    ema_eval_enabled = bool(getattr(args, "ema_eval", False) and ema_enabled)
+    if ema_enabled and is_master(args):
+        logging.info(f"EMA enabled for training. ema_eval={ema_eval_enabled}")
 
     # handle streaming dataset (num_batches=None)
     num_batches_per_epoch = getattr(dataloader, "num_batches", None)
@@ -961,6 +974,12 @@ def train(
                 optimizer.step()
                 if geo_step_ready:
                     geo_optimizer.step()
+            if retrieval_model_ema is not None:
+                retrieval_model_ema.update(model)
+            if img2text_ema is not None:
+                img2text_ema.update(img2text)
+            if geo_step_ready and geo_text_ema is not None:
+                geo_text_ema.update(geo_text_model)
             optimizer.zero_grad(set_to_none=True)
             if geo_optimizer is not None:
                 geo_optimizer.zero_grad(set_to_none=True)
@@ -1077,13 +1096,14 @@ def train(
 
                 if is_master(args):
                     eval_start = time.time()
-                    cirr_metrics = evaluate_cirr(
-                        model,
-                        img2text,
-                        args,
-                        data["cirr_val_query_loader"],
-                        data["cirr_val_target_loader"],
-                    )
+                    with (use_ema_weights(ema_pairs) if ema_eval_enabled else nullcontext()):
+                        cirr_metrics = evaluate_cirr(
+                            model,
+                            img2text,
+                            args,
+                            data["cirr_val_query_loader"],
+                            data["cirr_val_target_loader"],
+                        )
                     eval_time = time.time() - eval_start
 
                     if cirr_metrics:
@@ -1116,6 +1136,7 @@ def train(
                                 "step": int(global_step),
                                 "eval_time_sec": float(eval_time),
                                 "metrics": cirr_metrics,
+                                "used_ema": bool(ema_eval_enabled),
                             }
                             with open(log_file, "a", encoding="utf-8") as f:
                                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -1129,9 +1150,8 @@ def train(
                     dist.barrier()
 
             def _save_step_checkpoint(save_step: int):
-                save_path = os.path.join(args.checkpoint_path, f"epoch_{epoch}_step_{save_step}.pt")
-                torch.save(
-                    {
+                def _build_checkpoint_payload():
+                    return {
                         "epoch": epoch,
                         "step": save_step,
                         "name": args.name,
@@ -1141,9 +1161,13 @@ def train(
                         "optimizer": optimizer.state_dict(),
                         "optimizer_retrieval": optimizer.state_dict(),
                         "optimizer_geo": geo_optimizer.state_dict() if geo_optimizer is not None else None,
-                    },
-                    save_path,
-                )
+                        "ema_retrieval_model": retrieval_model_ema.state_dict() if retrieval_model_ema is not None else None,
+                        "ema_img2text": img2text_ema.state_dict() if img2text_ema is not None else None,
+                        "ema_geo_text": geo_text_ema.state_dict() if geo_text_ema is not None else None,
+                    }
+
+                save_path = os.path.join(args.checkpoint_path, f"epoch_{epoch}_step_{save_step}.pt")
+                torch.save(_build_checkpoint_payload(), save_path)
                 logging.info(f"Saved checkpoint at step {save_step}: {save_path}")
 
                 if geo_text_model is not None:
@@ -1157,6 +1181,30 @@ def train(
                         logging.info(
                             f"Saved geo LoRA-only weights ({len(geo_lora_state_dict)} params) to {geo_lora_path}"
                         )
+                if getattr(args, "ema_save_checkpoints", False) and ema_enabled:
+                    ema_save_path = os.path.join(args.checkpoint_path, f"epoch_{epoch}_step_{save_step}_ema.pt")
+                    with use_ema_weights(ema_pairs):
+                        ema_payload = _build_checkpoint_payload()
+                        ema_payload["optimizer"] = None
+                        ema_payload["optimizer_retrieval"] = None
+                        ema_payload["optimizer_geo"] = None
+                        ema_payload["ema_checkpoint"] = True
+                        torch.save(ema_payload, ema_save_path)
+                        logging.info(f"Saved EMA checkpoint at step {save_step}: {ema_save_path}")
+                        if geo_text_model is not None and geo_text_ema is not None:
+                            geo_lora_ema_state_dict = {}
+                            for n, p in geo_text_model.named_parameters():
+                                if n.endswith(".A") or n.endswith(".B"):
+                                    geo_lora_ema_state_dict[n] = p.data.clone()
+                            if geo_lora_ema_state_dict:
+                                geo_lora_ema_path = os.path.join(
+                                    args.checkpoint_path,
+                                    f"epoch_{epoch}_step_{save_step}_geo_lora_ema.pt",
+                                )
+                                torch.save(geo_lora_ema_state_dict, geo_lora_ema_path)
+                                logging.info(
+                                    f"Saved geo EMA LoRA-only weights ({len(geo_lora_ema_state_dict)} params) to {geo_lora_ema_path}"
+                                )
 
             if is_master(args):
                 save_step_start = int(getattr(args, "save_step_start", 0))

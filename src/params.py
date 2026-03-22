@@ -448,6 +448,8 @@ def parse_args():
                         help="GradScaler backoff factor for the retrieval branch.")
     parser.add_argument("--amp-growth-interval", type=int, default=2000,
                         help="GradScaler growth interval for the retrieval branch.")
+    parser.add_argument("--retrieval-ema-decay", type=float, default=0.0,
+                        help="EMA decay for the retrieval branch (CLIP LoRA/logit_scale + img2text). Set <=0 to disable.")
     parser.add_argument("--reset-logit-scale", action="store_true", default=False,
                         help="Reset logit_scale to standard CLIP value (log(1/0.07) ≈ 2.659) at start of training.")
     parser.add_argument("--freeze-logit-scale", action="store_true", default=False,
@@ -491,6 +493,12 @@ def parse_args():
                         help="Geo branch GradScaler backoff factor. Defaults to --amp-backoff-factor.")
     parser.add_argument("--geo-amp-growth-interval", type=int, default=None,
                         help="Geo branch GradScaler growth interval. Defaults to --amp-growth-interval.")
+    parser.add_argument("--geo-ema-decay", type=float, default=None,
+                        help="EMA decay for the geo branch. Defaults to --retrieval-ema-decay.")
+    parser.add_argument("--ema-eval", action="store_true", default=False,
+                        help="Evaluate CIRR validation with EMA weights when EMA is enabled.")
+    parser.add_argument("--ema-save-checkpoints", action="store_true", default=False,
+                        help="Also save EMA-only checkpoint variants when EMA is enabled.")
     parser.add_argument("--geo-conflict-projection", action="store_true", default=False,
                         help="Project geo gradients away from conflicting retrieval gradients.")
     parser.add_argument("--geo-reverse-weight", type=float, default=0.25,
@@ -550,6 +558,7 @@ def parse_args():
         "geo_amp_growth_factor": args.amp_growth_factor,
         "geo_amp_backoff_factor": args.amp_backoff_factor,
         "geo_amp_growth_interval": args.amp_growth_interval,
+        "geo_ema_decay": args.retrieval_ema_decay,
     }
     for name, val in geo_fallbacks.items():
         if getattr(args, name) is None:
