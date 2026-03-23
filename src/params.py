@@ -513,6 +513,10 @@ def parse_args():
                         help="Lower bound used when normalizing the geo delta direction z_tgt - z_src.")
     parser.add_argument("--geo-delta-min-norm", type=float, default=1e-3,
                         help="Skip geo samples whose text delta norm is too small to define a stable direction.")
+    parser.add_argument("--geo-sampling-mode", type=str, default="all", choices=["all", "hard", "random"],
+                        help="Subset strategy for the geo branch within each retrieval batch.")
+    parser.add_argument("--geo-topk", type=int, default=0,
+                        help="If > 0 and geo-sampling-mode is not all, keep only the top-k selected geo samples per batch.")
     parser.add_argument("--cirr-val-merge-base", type=str, default=None,
                         help="Full checkpoint used as the retrieval base when doing periodic merged CIRR validation.")
     parser.add_argument("--cirr-val-merge-density", type=float, default=0.9,

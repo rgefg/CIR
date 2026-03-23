@@ -103,4 +103,5 @@ bestqwen 合并排查结论：
 - 训练端也切到 qkv-aware LoRA，不再只训练 out_proj + mlp
 - 继续保留双分支 EMA
 - geo loss 默认切到 strict 版本，显式开启 zero-loss regularizer
+- geo 分支默认改为同 batch hard top-8 采样，难度信号来自 retrieval 当前 batch 的逐样本双向 CE（detach 后选样本，不回传到 retrieval）
 - watcher 默认关闭，避免再对训练造成额外扰动

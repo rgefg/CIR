@@ -472,6 +472,12 @@ def get_loss_lcom_cc3m(model, img2text, ref_images, instructions, modified_capti
     # 计算双向 Loss
     loss_q2c = loss_fn(logits_per_query, targets) # Query 找 Caption
     loss_c2q = loss_fn(logits_per_caption, targets) # Caption 找 Query
+
+    local_batch_size = query_features.size(0)
+    local_targets = torch.arange(local_batch_size, device=all_q.device, dtype=torch.long)
+    local_q2c = F.cross_entropy(logits_per_query[:local_batch_size], local_targets, reduction="none")
+    local_c2q = F.cross_entropy(logits_per_caption[:local_batch_size], local_targets, reduction="none")
+    per_sample_retrieval_loss = 0.5 * (local_q2c + local_c2q)
     
     loss = (loss_q2c + loss_c2q) / 2
     # --- 修改结束 ---
@@ -479,8 +485,97 @@ def get_loss_lcom_cc3m(model, img2text, ref_images, instructions, modified_capti
     stats = {
         "loss_q2c": float(loss_q2c.detach().item()),
         "loss_c2q": float(loss_c2q.detach().item()),
+        "retrieval_hardness_mean": float(per_sample_retrieval_loss.detach().mean().item()),
+        "retrieval_hardness_max": float(per_sample_retrieval_loss.detach().max().item()),
     }
-    return loss, stats
+    aux = {
+        "per_sample_retrieval_loss": per_sample_retrieval_loss.detach(),
+    }
+    return loss, stats, aux
+
+
+def _select_batch_items(items, indices):
+    if indices is None:
+        return list(items)
+    return [items[i] for i in indices]
+
+
+def _zero_geo_loss(text_model):
+    first_param = next(text_model.parameters(), None)
+    if first_param is None:
+        return torch.tensor(0.0)
+    return first_param.sum() * 0.0
+
+
+def select_geo_subset(
+    src_captions,
+    modified_captions,
+    forward_instructions,
+    reverse_instructions,
+    per_sample_retrieval_loss,
+    args,
+):
+    mode = str(getattr(args, "geo_sampling_mode", "all")).lower()
+    topk = int(getattr(args, "geo_topk", 0))
+    batch_size = len(modified_captions)
+
+    if batch_size == 0:
+        return [], {
+            "geo_candidate_ratio": 0.0,
+            "geo_candidate_count": 0.0,
+            "geo_selected_ratio": 0.0,
+            "geo_selected_count": 0.0,
+            "geo_selected_hardness_mean": 0.0,
+            "geo_sampling_is_hard": 0.0,
+            "geo_sampling_is_random": 0.0,
+        }
+
+    device = per_sample_retrieval_loss.device if per_sample_retrieval_loss is not None else "cpu"
+    has_src = torch.tensor([bool(_to_text(x).strip()) for x in src_captions], device=device, dtype=torch.bool)
+    has_tgt = torch.tensor([bool(_to_text(x).strip()) for x in modified_captions], device=device, dtype=torch.bool)
+    has_fwd = torch.tensor([bool(_to_text(x).strip()) for x in forward_instructions], device=device, dtype=torch.bool)
+    has_rev = torch.tensor([bool(_to_text(x).strip()) for x in reverse_instructions], device=device, dtype=torch.bool)
+    candidate_mask = has_src & has_tgt & has_fwd & has_rev
+    candidate_indices = candidate_mask.nonzero(as_tuple=False).flatten()
+
+    if candidate_indices.numel() == 0:
+        return [], {
+            "geo_candidate_ratio": 0.0,
+            "geo_candidate_count": 0.0,
+            "geo_selected_ratio": 0.0,
+            "geo_selected_count": 0.0,
+            "geo_selected_hardness_mean": 0.0,
+            "geo_sampling_is_hard": 1.0 if mode == "hard" else 0.0,
+            "geo_sampling_is_random": 1.0 if mode == "random" else 0.0,
+        }
+
+    if mode == "all" or topk <= 0 or candidate_indices.numel() <= topk:
+        selected_indices = candidate_indices
+    elif mode == "hard" and per_sample_retrieval_loss is not None:
+        candidate_scores = per_sample_retrieval_loss[candidate_indices]
+        _, order = torch.topk(candidate_scores, k=topk, largest=True, sorted=False)
+        selected_indices = candidate_indices[order]
+    elif mode == "random":
+        perm = torch.randperm(candidate_indices.numel(), device=candidate_indices.device)
+        selected_indices = candidate_indices[perm[:topk]]
+    else:
+        selected_indices = candidate_indices
+
+    selected_indices = selected_indices.sort().values
+    selected_hardness_mean = 0.0
+    if per_sample_retrieval_loss is not None and selected_indices.numel() > 0:
+        selected_hardness_mean = float(per_sample_retrieval_loss[selected_indices].mean().detach().item())
+
+    stats = {
+        "geo_candidate_ratio": float(candidate_indices.numel()) / float(batch_size),
+        "geo_candidate_count": float(candidate_indices.numel()),
+        "geo_selected_ratio": float(selected_indices.numel()) / float(batch_size),
+        "geo_selected_count": float(selected_indices.numel()),
+        "geo_selected_hardness_mean": selected_hardness_mean,
+        "geo_sampling_is_hard": 1.0 if mode == "hard" else 0.0,
+        "geo_sampling_is_random": 1.0 if mode == "random" else 0.0,
+    }
+    return selected_indices.detach().cpu().tolist(), stats
 
 
 def get_loss_geo_text_branch(
@@ -827,7 +922,7 @@ def train(
 
             if args.precision == "amp":
                 with autocast():
-                    retrieval_loss, retrieval_stats = get_loss_lcom_cc3m(
+                    retrieval_loss, retrieval_stats, retrieval_aux = get_loss_lcom_cc3m(
                         m,
                         i2t,
                         images,
@@ -839,16 +934,47 @@ def train(
                     total_loss = retrieval_loss / float(accum_steps)
                 retrieval_scaler.scale(total_loss).backward()
                 if geo_enabled:
+                    geo_indices, geo_sampling_stats = select_geo_subset(
+                        src_captions,
+                        modified_captions,
+                        geo_forward_instructions,
+                        reverse_instructions,
+                        retrieval_aux.get("per_sample_retrieval_loss"),
+                        args,
+                    )
+                    geo_src = _select_batch_items(src_captions, geo_indices)
+                    geo_tgt = _select_batch_items(modified_captions, geo_indices)
+                    geo_fwd = _select_batch_items(geo_forward_instructions, geo_indices)
+                    geo_rev = _select_batch_items(reverse_instructions, geo_indices)
                     with _geo_rng_context(geo_rng_state, enabled=True):
                         with autocast():
-                            geo_loss, geo_stats = get_loss_geo_text_branch(
-                                g,
-                                src_captions,
-                                modified_captions,
-                                geo_forward_instructions,
-                                reverse_instructions,
-                                args,
-                            )
+                            if geo_tgt:
+                                geo_loss, geo_stats = get_loss_geo_text_branch(
+                                    g,
+                                    geo_src,
+                                    geo_tgt,
+                                    geo_fwd,
+                                    geo_rev,
+                                    args,
+                                )
+                            else:
+                                geo_loss = _zero_geo_loss(g)
+                                geo_stats = {
+                                    "loss_fwd": 0.0,
+                                    "loss_rev": 0.0,
+                                    "loss_reverse_consistency": 0.0,
+                                    "loss_zero_regularizer": 0.0,
+                                    "loss_geom_total": 0.0,
+                                    "z_fwd_align": 0.0,
+                                    "z_rev_align": 0.0,
+                                    "z_fwd_rev_cos": 0.0,
+                                    "z_fwd_rev_zero_norm": 0.0,
+                                    "geo_valid_ratio": 0.0,
+                                    "geo_valid_count": 0,
+                                    "geo_missing_src_ratio": 0.0,
+                                    "geo_small_delta_ratio": 0.0,
+                                    "geo_delta_norm_mean": 0.0,
+                                }
                             weighted_geo_loss = geo_loss * geo_weight
                         if torch.isfinite(weighted_geo_loss.detach()).all():
                             geo_scaler.scale(weighted_geo_loss / float(accum_steps)).backward()
@@ -860,7 +986,7 @@ def train(
                 else:
                     geo_loss, geo_stats, weighted_geo_loss = None, None, None
             else:
-                retrieval_loss, retrieval_stats = get_loss_lcom_cc3m(
+                retrieval_loss, retrieval_stats, retrieval_aux = get_loss_lcom_cc3m(
                     m,
                     i2t,
                     images,
@@ -871,15 +997,46 @@ def train(
                 )
                 (retrieval_loss / float(accum_steps)).backward()
                 if geo_enabled:
+                    geo_indices, geo_sampling_stats = select_geo_subset(
+                        src_captions,
+                        modified_captions,
+                        geo_forward_instructions,
+                        reverse_instructions,
+                        retrieval_aux.get("per_sample_retrieval_loss"),
+                        args,
+                    )
+                    geo_src = _select_batch_items(src_captions, geo_indices)
+                    geo_tgt = _select_batch_items(modified_captions, geo_indices)
+                    geo_fwd = _select_batch_items(geo_forward_instructions, geo_indices)
+                    geo_rev = _select_batch_items(reverse_instructions, geo_indices)
                     with _geo_rng_context(geo_rng_state, enabled=True):
-                        geo_loss, geo_stats = get_loss_geo_text_branch(
-                            g,
-                            src_captions,
-                            modified_captions,
-                            geo_forward_instructions,
-                            reverse_instructions,
-                            args,
-                        )
+                        if geo_tgt:
+                            geo_loss, geo_stats = get_loss_geo_text_branch(
+                                g,
+                                geo_src,
+                                geo_tgt,
+                                geo_fwd,
+                                geo_rev,
+                                args,
+                            )
+                        else:
+                            geo_loss = _zero_geo_loss(g)
+                            geo_stats = {
+                                "loss_fwd": 0.0,
+                                "loss_rev": 0.0,
+                                "loss_reverse_consistency": 0.0,
+                                "loss_zero_regularizer": 0.0,
+                                "loss_geom_total": 0.0,
+                                "z_fwd_align": 0.0,
+                                "z_rev_align": 0.0,
+                                "z_fwd_rev_cos": 0.0,
+                                "z_fwd_rev_zero_norm": 0.0,
+                                "geo_valid_ratio": 0.0,
+                                "geo_valid_count": 0,
+                                "geo_missing_src_ratio": 0.0,
+                                "geo_small_delta_ratio": 0.0,
+                                "geo_delta_norm_mean": 0.0,
+                            }
                         weighted_geo_loss = geo_loss * geo_weight
                         (weighted_geo_loss / float(accum_steps)).backward()
                 else:
@@ -891,6 +1048,8 @@ def train(
             if retrieval_stats:
                 loss_stats.update(retrieval_stats)
             if geo_enabled:
+                if geo_sampling_stats:
+                    loss_stats.update(geo_sampling_stats)
                 if weighted_geo_loss is not None:
                     loss_stats["loss_geo_weighted"] = float(weighted_geo_loss.detach().item())
                     loss_stats["loss_parallel_total"] = float(
@@ -1045,6 +1204,10 @@ def train(
                         log_msg += f"\tgeo_missing_src: {loss_stats['geo_missing_src_ratio']:.2%}"
                     if "geo_small_delta_ratio" in loss_stats:
                         log_msg += f"\tgeo_small_delta: {loss_stats['geo_small_delta_ratio']:.2%}"
+                    if "geo_selected_count" in loss_stats:
+                        log_msg += f"\tgeo_selected: {loss_stats['geo_selected_count']:.0f}"
+                    if "geo_selected_hardness_mean" in loss_stats:
+                        log_msg += f"\tgeo_hardness: {loss_stats['geo_selected_hardness_mean']:.4f}"
                     if "inst_dropout_rate" in loss_stats:
                         log_msg += f"\tinst_dropout: {loss_stats['inst_dropout_rate']:.2%}"
                 if args.precision == "amp":

@@ -5,7 +5,7 @@ export PYTHONPATH="/data2/mingyu/composed_image_retrieval:/data2/mingyu/composed
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 DIST_URL="${DIST_URL:-tcp://127.0.0.1:6146}"
-TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-6,7}}"
+TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-0,1}}"
 RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1700_QKV_StrictLoss}"
 EVAL_GPU="${EVAL_GPU:-2}"
 
@@ -70,6 +70,8 @@ GEO_ZERO_LOSS_WEIGHT="${GEO_ZERO_LOSS_WEIGHT:-1.0}"
 GEO_EMBED_NORM_EPS="${GEO_EMBED_NORM_EPS:-1e-6}"
 GEO_DELTA_NORM_EPS="${GEO_DELTA_NORM_EPS:-1e-4}"
 GEO_DELTA_MIN_NORM="${GEO_DELTA_MIN_NORM:-1e-3}"
+GEO_SAMPLING_MODE="${GEO_SAMPLING_MODE:-hard}"
+GEO_TOPK="${GEO_TOPK:-8}"
 ENABLE_EMA_EVAL="${ENABLE_EMA_EVAL:-1}"
 ENABLE_EMA_SAVE_CHECKPOINTS="${ENABLE_EMA_SAVE_CHECKPOINTS:-1}"
 
@@ -126,6 +128,7 @@ echo "Geo EMA decay: ${GEO_EMA_DECAY}"
 echo "EMA eval: ${ENABLE_EMA_EVAL}"
 echo "EMA save checkpoints: ${ENABLE_EMA_SAVE_CHECKPOINTS}"
 echo "Geo strict loss: reverse_weight=${GEO_REVERSE_WEIGHT}, reverse_margin=${GEO_REVERSE_MARGIN}, zero_loss_weight=${GEO_ZERO_LOSS_WEIGHT}"
+echo "Geo sampling: mode=${GEO_SAMPLING_MODE}, topk=${GEO_TOPK}"
 echo "Geo norm eps: embed=${GEO_EMBED_NORM_EPS}, delta=${GEO_DELTA_NORM_EPS}, min_delta=${GEO_DELTA_MIN_NORM}"
 echo "Watcher isolation: affinity=${WATCHER_CPU_AFFINITY}, nice=${WATCHER_NICE}, cpu_threads=${WATCHER_CPU_THREADS}, eval_workers=${WATCHER_EVAL_WORKERS}"
 
@@ -233,6 +236,8 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \
   --geo-reverse-weight "${GEO_REVERSE_WEIGHT}" \
   --geo-reverse-margin "${GEO_REVERSE_MARGIN}" \
   --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}" \
+  --geo-sampling-mode "${GEO_SAMPLING_MODE}" \
+  --geo-topk "${GEO_TOPK}" \
   --geo-embed-norm-eps "${GEO_EMBED_NORM_EPS}" \
   --geo-delta-norm-eps "${GEO_DELTA_NORM_EPS}" \
   --geo-delta-min-norm "${GEO_DELTA_MIN_NORM}" \
