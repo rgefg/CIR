@@ -8,7 +8,10 @@ from peft.utils.merge_utils import ties
 
 
 def _load_checkpoint(path: Path):
-   return torch.load(str(path), map_location="cpu", weights_only=False)
+   try:
+      return torch.load(str(path), map_location="cpu", weights_only=False, mmap=True)
+   except TypeError:
+      return torch.load(str(path), map_location="cpu", weights_only=False)
 
 
 def _extract_lora_dict(ckpt) -> Tuple[Dict[str, torch.Tensor], str]:
@@ -109,9 +112,17 @@ def main() -> None:
    parser.add_argument("--rank-a", type=int, default=None, help="LoRA rank for checkpoint A (optional).")
    parser.add_argument("--alpha-b", type=float, default=None, help="LoRA alpha for checkpoint B (optional).")
    parser.add_argument("--rank-b", type=int, default=None, help="LoRA rank for checkpoint B (optional).")
+   parser.add_argument(
+      "--slim-output",
+      action="store_true",
+      default=False,
+      help="When base checkpoint is full, save only the tensors required for eval.",
+   )
    args = parser.parse_args()
 
+   print(f"loading ckpt_a: {args.ckpt_a}", flush=True)
    ckpt_a = _load_checkpoint(args.ckpt_a)
+   print(f"loading ckpt_b: {args.ckpt_b}", flush=True)
    ckpt_b = _load_checkpoint(args.ckpt_b)
    lora_a, type_a = _extract_lora_dict(ckpt_a)
    lora_b, type_b = _extract_lora_dict(ckpt_b)
@@ -161,6 +172,7 @@ def main() -> None:
    w = torch.tensor(args.weights, dtype=torch.float32)
    merged_AB: Dict[str, torch.Tensor] = {}
    copied_b_only_prefixes = 0
+   weight_b = float(args.weights[1])
    for p in valid_prefixes:
       aA = pair_a[p]["A"].float()
       aB = pair_a[p]["B"].float()
@@ -197,15 +209,29 @@ def main() -> None:
          pb = pair_b[p]
          if not _valid_copy_pair(pb):
             continue
+         bA = pb["A"].float()
+         bB = pb["B"].float()
+         delta_b_eff = scale_b * (bB @ bA)
+         delta_m = (weight_b * delta_b_eff) / base_scale
+         rank_target = pb["A"].shape[0]
+         out_dtype = pb["A"].dtype
+         mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype)
          kA = pb.get("A_key", p + ".A")
          kB = pb.get("B_key", p + ".B")
-         merged_AB[kA] = pb["A"].clone()
-         merged_AB[kB] = pb["B"].clone()
+         merged_AB[kA] = mA
+         merged_AB[kB] = mB
          copied_b_only_prefixes += 1
 
    base_ckpt = ckpt_b if args.base == "b" else ckpt_a
    if isinstance(base_ckpt, dict) and "state_dict" in base_ckpt and isinstance(base_ckpt["state_dict"], dict):
-      out_ckpt = dict(base_ckpt)
+      out_ckpt = (
+         {
+            "state_dict": dict(base_ckpt["state_dict"]),
+            "state_dict_img2text": base_ckpt.get("state_dict_img2text"),
+         }
+         if args.slim_output
+         else dict(base_ckpt)
+      )
       out_sd = dict(base_ckpt["state_dict"])
       replaced = 0
       for k, v in merged_AB.items():
@@ -227,6 +253,7 @@ def main() -> None:
          replaced += 1
 
    args.output.parent.mkdir(parents=True, exist_ok=True)
+   print(f"saving merged checkpoint: {args.output}", flush=True)
    torch.save(out_ckpt, str(args.output))
 
    print(f"ckpt_a: {args.ckpt_a} ({type_a})")

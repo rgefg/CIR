@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 
 from third_party.open_clip.scheduler import cosine_lr
 from model.clip import _transform, load
-from model.model import convert_weights, CLIP, IM2TEXT
+from model.model import convert_weights, CLIP, IM2TEXT, LoRAMultiheadAttention, LoRALinear as ModelLoRALinear
 from trainer import train
 from data import get_data, CIRR
 from params import parse_args, get_project_root
@@ -72,21 +72,82 @@ class LoRALinear(nn.Module):
         return self.base.bias
 
 
+def _is_lora_linear(module: nn.Module) -> bool:
+    return isinstance(module, (LoRALinear, ModelLoRALinear))
+
+
+def _clone_multihead_without_lora(module: nn.MultiheadAttention) -> nn.MultiheadAttention:
+    if not isinstance(module, (nn.MultiheadAttention, LoRAMultiheadAttention)):
+        raise TypeError(f"Expected MultiheadAttention, got {type(module)}")
+
+    cloned = nn.MultiheadAttention(
+        embed_dim=module.embed_dim,
+        num_heads=module.num_heads,
+        dropout=module.dropout,
+        bias=module.in_proj_bias is not None,
+        add_bias_kv=module.bias_k is not None,
+        add_zero_attn=module.add_zero_attn,
+        kdim=module.kdim,
+        vdim=module.vdim,
+        batch_first=module.batch_first,
+    )
+
+    src_out_proj = module.out_proj.base if _is_lora_linear(module.out_proj) else module.out_proj
+    with torch.no_grad():
+        cloned.in_proj_weight.copy_(module.in_proj_weight.detach())
+        if cloned.in_proj_bias is not None and module.in_proj_bias is not None:
+            cloned.in_proj_bias.copy_(module.in_proj_bias.detach())
+        if cloned.bias_k is not None and module.bias_k is not None:
+            cloned.bias_k.copy_(module.bias_k.detach())
+        if cloned.bias_v is not None and module.bias_v is not None:
+            cloned.bias_v.copy_(module.bias_v.detach())
+        cloned.out_proj.weight.copy_(src_out_proj.weight.detach())
+        if cloned.out_proj.bias is not None and src_out_proj.bias is not None:
+            cloned.out_proj.bias.copy_(src_out_proj.bias.detach())
+    return cloned
+
+
 def _clone_module_without_lora(module: nn.Module) -> nn.Module:
     cloned = copy.deepcopy(module)
     for name, child in list(cloned.named_children()):
-        if isinstance(child, LoRALinear):
+        if _is_lora_linear(child):
             setattr(cloned, name, copy.deepcopy(child.base))
+        elif isinstance(child, LoRAMultiheadAttention):
+            setattr(cloned, name, _clone_multihead_without_lora(child))
         else:
             setattr(cloned, name, _clone_module_without_lora(child))
     return cloned
 
 
+def _copy_multihead_base_weights(dst_module: nn.Module, src_module: nn.Module):
+    dst_base = _clone_multihead_without_lora(dst_module) if isinstance(dst_module, LoRAMultiheadAttention) else dst_module
+    src_base = _clone_multihead_without_lora(src_module) if isinstance(src_module, LoRAMultiheadAttention) else src_module
+    if not isinstance(dst_base, nn.MultiheadAttention) or not isinstance(src_base, nn.MultiheadAttention):
+        raise TypeError(f"Expected MultiheadAttention pair, got {type(dst_base)} and {type(src_base)}")
+
+    src_out_proj = src_base.out_proj
+    dst_out_proj = dst_module.out_proj.base if isinstance(dst_module, LoRAMultiheadAttention) and _is_lora_linear(dst_module.out_proj) else dst_base.out_proj
+    with torch.no_grad():
+        dst_base.in_proj_weight.copy_(src_base.in_proj_weight.detach())
+        if dst_base.in_proj_bias is not None and src_base.in_proj_bias is not None:
+            dst_base.in_proj_bias.copy_(src_base.in_proj_bias.detach())
+        if dst_base.bias_k is not None and src_base.bias_k is not None:
+            dst_base.bias_k.copy_(src_base.bias_k.detach())
+        if dst_base.bias_v is not None and src_base.bias_v is not None:
+            dst_base.bias_v.copy_(src_base.bias_v.detach())
+        dst_out_proj.weight.copy_(src_out_proj.weight.detach())
+        if dst_out_proj.bias is not None and src_out_proj.bias is not None:
+            dst_out_proj.bias.copy_(src_out_proj.bias.detach())
+
+
 def _copy_module_base_weights(dst_module: nn.Module, src_module: nn.Module):
-    if isinstance(dst_module, LoRALinear):
+    if _is_lora_linear(dst_module):
         dst_module = dst_module.base
-    if isinstance(src_module, LoRALinear):
+    if _is_lora_linear(src_module):
         src_module = src_module.base
+    if isinstance(dst_module, (nn.MultiheadAttention, LoRAMultiheadAttention)) or isinstance(src_module, (nn.MultiheadAttention, LoRAMultiheadAttention)):
+        _copy_multihead_base_weights(dst_module, src_module)
+        return
 
     dst_children = dict(dst_module.named_children())
     src_children = dict(src_module.named_children())
@@ -107,9 +168,11 @@ def _copy_module_base_weights(dst_module: nn.Module, src_module: nn.Module):
 
 def apply_lora_to_linear_layers(module: nn.Module, r: int, alpha: int, dropout: float = 0.0):
     for name, child in list(module.named_children()):
-        if isinstance(child, LoRALinear):
+        if isinstance(child, LoRAMultiheadAttention) or _is_lora_linear(child):
             continue
-        if isinstance(child, nn.Linear):
+        if isinstance(child, nn.MultiheadAttention):
+            setattr(module, name, LoRAMultiheadAttention(child, r=r, alpha=alpha, dropout=dropout))
+        elif isinstance(child, nn.Linear):
             setattr(module, name, LoRALinear(child, r=r, alpha=alpha, dropout=dropout))
         else:
             apply_lora_to_linear_layers(child, r=r, alpha=alpha, dropout=dropout)
