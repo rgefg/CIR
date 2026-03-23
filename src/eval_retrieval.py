@@ -36,7 +36,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from model.clip import _transform, load
-from model.model import convert_weights, CLIP, IM2TEXT
+from model.model import convert_weights, CLIP, IM2TEXT, enable_lora_on_clip
 from eval_utils import evaluate_imgnet_retrieval, evaluate_coco, evaluate_fashion, evaluate_cirr, evaluate_cirr_test
 from data import CsvDataset, CustomFolder, ImageList, CsvCOCO, FashionIQ, CIRR
 from params import parse_args, get_project_root
@@ -44,7 +44,7 @@ from logger import setup_primary_logging, setup_worker_logging
 from utils import is_master, convert_models_to_fp32, TargetPad
 
 # -------------------
-# LoRA (minimal, local) - 从main.py复制
+# LoRA (minimal, local) - 与当前 main.py 保持一致
 # -------------------
 class LoRALinear(nn.Module):
     def __init__(self, base: nn.Linear, r: int = 64, alpha: int = 16, dropout: float = 0.0):
@@ -64,17 +64,8 @@ class LoRALinear(nn.Module):
         nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
         nn.init.zeros_(self.B)
 
-    @property
-    def lora_weight(self):
-        delta = self.B @ self.A
-        return (self.scaling * delta).to(dtype=self.base.weight.dtype)
-
-    @property
-    def effective_weight(self):
-        return self.base.weight + self.lora_weight
-
     def forward(self, x):
-        out = torch.nn.functional.linear(x, self.base.weight, self.base.bias)
+        out = self.base(x)
         x_d = self.dropout(x)
         A = self.A.to(dtype=x_d.dtype)
         B = self.B.to(dtype=x_d.dtype)
@@ -83,131 +74,18 @@ class LoRALinear(nn.Module):
 
     @property
     def weight(self):
-        """Forward weight access to base Linear layer for compatibility."""
-        return self.effective_weight
+        return self.base.weight
 
     @property
     def bias(self):
-        """Forward bias access to base Linear layer for compatibility."""
         return self.base.bias
-
-
-class LoRAProjection(nn.Module):
-    def __init__(self, out_features: int, in_features: int, r: int = 64, alpha: int = 16):
-        super().__init__()
-        self.r = r
-        self.alpha = alpha
-        self.scaling = alpha / float(r)
-        self.A = nn.Parameter(torch.empty(r, in_features))
-        self.B = nn.Parameter(torch.empty(out_features, r))
-        nn.init.kaiming_uniform_(self.A, a=math.sqrt(5))
-        nn.init.zeros_(self.B)
-
-    @property
-    def lora_weight(self):
-        delta = self.B @ self.A
-        return self.scaling * delta
-
-
-class LoRAMultiheadAttention(nn.MultiheadAttention):
-    def __init__(self, base: nn.MultiheadAttention, r: int = 64, alpha: int = 16, dropout: float = 0.0):
-        super().__init__(
-            embed_dim=base.embed_dim,
-            num_heads=base.num_heads,
-            dropout=base.dropout,
-            bias=base.in_proj_bias is not None,
-            add_bias_kv=base.bias_k is not None,
-            add_zero_attn=base.add_zero_attn,
-            kdim=base.kdim,
-            vdim=base.vdim,
-            batch_first=base.batch_first,
-        )
-        super().load_state_dict(base.state_dict())
-
-        if not self._qkv_same_embed_dim:
-            raise NotImplementedError("LoRAMultiheadAttention only supports _qkv_same_embed_dim=True.")
-
-        self.in_proj_weight.requires_grad = False
-        if self.in_proj_bias is not None:
-            self.in_proj_bias.requires_grad = False
-        if self.bias_k is not None:
-            self.bias_k.requires_grad = False
-        if self.bias_v is not None:
-            self.bias_v.requires_grad = False
-
-        self.q_proj_lora = LoRAProjection(self.embed_dim, self.embed_dim, r=r, alpha=alpha)
-        self.k_proj_lora = LoRAProjection(self.embed_dim, self.embed_dim, r=r, alpha=alpha)
-        self.v_proj_lora = LoRAProjection(self.embed_dim, self.embed_dim, r=r, alpha=alpha)
-        self.out_proj = LoRALinear(self.out_proj, r=r, alpha=alpha, dropout=dropout)
-
-    @property
-    def effective_in_proj_weight(self):
-        q_weight, k_weight, v_weight = self.in_proj_weight.chunk(3, dim=0)
-        return torch.cat(
-            [
-                q_weight + self.q_proj_lora.lora_weight.to(dtype=q_weight.dtype, device=q_weight.device),
-                k_weight + self.k_proj_lora.lora_weight.to(dtype=k_weight.dtype, device=k_weight.device),
-                v_weight + self.v_proj_lora.lora_weight.to(dtype=v_weight.dtype, device=v_weight.device),
-            ],
-            dim=0,
-        )
-
-    def forward(
-        self,
-        query,
-        key,
-        value,
-        key_padding_mask=None,
-        need_weights=True,
-        attn_mask=None,
-        average_attn_weights=True,
-        is_causal=False,
-    ):
-        is_batched = query.dim() == 3
-        if self.batch_first and is_batched:
-            if key is value:
-                if query is key:
-                    query = key = value = query.transpose(1, 0)
-                else:
-                    query, key = (x.transpose(1, 0) for x in (query, key))
-                    value = key
-            else:
-                query, key, value = (x.transpose(1, 0) for x in (query, key, value))
-
-        attn_output, attn_output_weights = F.multi_head_attention_forward(
-            query,
-            key,
-            value,
-            self.embed_dim,
-            self.num_heads,
-            self.effective_in_proj_weight,
-            self.in_proj_bias,
-            self.bias_k,
-            self.bias_v,
-            self.add_zero_attn,
-            self.dropout,
-            self.out_proj.weight,
-            self.out_proj.bias,
-            training=self.training,
-            key_padding_mask=key_padding_mask,
-            need_weights=need_weights,
-            attn_mask=attn_mask,
-            average_attn_weights=average_attn_weights,
-            is_causal=is_causal,
-        )
-
-        if self.batch_first and is_batched:
-            return attn_output.transpose(1, 0), attn_output_weights
-        return attn_output, attn_output_weights
 
 
 def apply_lora_to_linear_layers(module: nn.Module, r: int, alpha: int, dropout: float = 0.0):
     for name, child in list(module.named_children()):
-        if isinstance(child, (LoRALinear, LoRAMultiheadAttention)):
+        if isinstance(child, LoRALinear):
             continue
-        if isinstance(child, nn.MultiheadAttention):
-            setattr(module, name, LoRAMultiheadAttention(child, r=r, alpha=alpha, dropout=dropout))
-        elif isinstance(child, nn.Linear):
+        if isinstance(child, nn.Linear):
             setattr(module, name, LoRALinear(child, r=r, alpha=alpha, dropout=dropout))
         else:
             apply_lora_to_linear_layers(child, r=r, alpha=alpha, dropout=dropout)
@@ -225,9 +103,15 @@ def load_model(args):
         convert_models_to_fp32(model)
 
     # ---- Enable LoRA on CLIP (必须与训练时一致) ----
-    # 注意：LoRA应该在加载权重之前应用，这样模型结构才能匹配checkpoint
+    # 注意：LoRA应该在加载权重之前应用，这样模型结构才能匹配checkpoint。
+    # 使用 q/k/v-aware 的 LoRA 包装，才能接住 attention-only LoRA key。
     if not getattr(args, "no_lora", False):
-        apply_lora_to_linear_layers(model, r=getattr(args, "lora_r", 64), alpha=getattr(args, "lora_alpha", 16), dropout=getattr(args, "lora_dropout", 0.0))
+        enable_lora_on_clip(
+            model,
+            r=getattr(args, "lora_r", 64),
+            alpha=getattr(args, "lora_alpha", 16),
+            dropout=getattr(args, "lora_dropout", 0.0),
+        )
 
     if not torch.cuda.is_available():
         model.float()
