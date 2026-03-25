@@ -440,6 +440,8 @@ def parse_args():
     parser.add_argument("--lora-r", type=int, default=64)
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--lora-dropout", type=float, default=0.0)
+    parser.add_argument("--instruction-dropout-prob", type=float, default=0.0,
+                        help="Drop probability for the whole instruction string in the retrieval branch.")
     parser.add_argument("--amp-init-scale", type=float, default=65536.0,
                         help="GradScaler init scale for the retrieval branch.")
     parser.add_argument("--amp-growth-factor", type=float, default=2.0,

@@ -4,7 +4,7 @@ set -euo pipefail
 export PYTHONPATH="/data2/mingyu/composed_image_retrieval:/data2/mingyu/composed_image_retrieval/src:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-DIST_URL="${DIST_URL:-tcp://127.0.0.1:6146}"
+DIST_URL="${DIST_URL:-tcp://127.0.0.1:6147}"
 TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-0,1}}"
 RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1700_QKV_StrictLoss}"
 EVAL_GPU="${EVAL_GPU:-2}"
@@ -72,6 +72,7 @@ GEO_DELTA_NORM_EPS="${GEO_DELTA_NORM_EPS:-1e-4}"
 GEO_DELTA_MIN_NORM="${GEO_DELTA_MIN_NORM:-1e-3}"
 GEO_SAMPLING_MODE="${GEO_SAMPLING_MODE:-hard}"
 GEO_TOPK="${GEO_TOPK:-8}"
+INSTRUCTION_DROPOUT_PROB="${INSTRUCTION_DROPOUT_PROB:-0.5}"
 ENABLE_EMA_EVAL="${ENABLE_EMA_EVAL:-1}"
 ENABLE_EMA_SAVE_CHECKPOINTS="${ENABLE_EMA_SAVE_CHECKPOINTS:-1}"
 
@@ -129,6 +130,7 @@ echo "EMA eval: ${ENABLE_EMA_EVAL}"
 echo "EMA save checkpoints: ${ENABLE_EMA_SAVE_CHECKPOINTS}"
 echo "Geo strict loss: reverse_weight=${GEO_REVERSE_WEIGHT}, reverse_margin=${GEO_REVERSE_MARGIN}, zero_loss_weight=${GEO_ZERO_LOSS_WEIGHT}"
 echo "Geo sampling: mode=${GEO_SAMPLING_MODE}, topk=${GEO_TOPK}"
+echo "Instruction dropout prob: ${INSTRUCTION_DROPOUT_PROB}"
 echo "Geo norm eps: embed=${GEO_EMBED_NORM_EPS}, delta=${GEO_DELTA_NORM_EPS}, min_delta=${GEO_DELTA_MIN_NORM}"
 echo "Watcher isolation: affinity=${WATCHER_CPU_AFFINITY}, nice=${WATCHER_NICE}, cpu_threads=${WATCHER_CPU_THREADS}, eval_workers=${WATCHER_EVAL_WORKERS}"
 
@@ -207,6 +209,7 @@ CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \
   --lora-r "${LORA_R}" \
   --lora-alpha "${LORA_ALPHA}" \
   --lora-dropout "${LORA_DROPOUT}" \
+  --instruction-dropout-prob "${INSTRUCTION_DROPOUT_PROB}" \
   --reset-logit-scale \
   --logit-scale-clamp-min 9.0 \
   --logit-scale-clamp-max 36.6 \

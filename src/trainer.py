@@ -891,26 +891,22 @@ def train(
             geo_forward_instructions = list(instructions)
 
             # ============================================================
-            # 🔒 Instruction Token Dropout: drop high-risk tokens only
+            # 🔒 Whole-instruction Dropout: drop the entire instruction
             # ============================================================
             instruction_dropout_prob = getattr(args, "instruction_dropout_prob", 0.0)
             num_dropped = 0
             num_eligible = 0
             if instruction_dropout_prob > 0.0 and model.training:
-                risk_set = _load_or_build_risk_tokens(args)
                 dropped_instructions = []
                 for inst in instructions:
                     inst_str = str(inst)
-                    tokens = inst_str.split()
-                    kept = []
-                    for tok in tokens:
-                        if _is_high_risk_token(tok, risk_set):
-                            num_eligible += 1
-                            if random.random() < instruction_dropout_prob:
-                                num_dropped += 1
-                                continue
-                        kept.append(tok)
-                    dropped_instructions.append(" ".join(kept).strip())
+                    if inst_str.strip():
+                        num_eligible += 1
+                        if random.random() < instruction_dropout_prob:
+                            num_dropped += 1
+                            dropped_instructions.append("")
+                            continue
+                    dropped_instructions.append(inst_str)
                 instructions = dropped_instructions
             # ============================================================
 
