@@ -519,6 +519,18 @@ def parse_args():
                         help="Subset strategy for the geo branch within each retrieval batch.")
     parser.add_argument("--geo-topk", type=int, default=0,
                         help="If > 0 and geo-sampling-mode is not all, keep only the top-k selected geo samples per batch.")
+    parser.add_argument("--conflict-probe", action="store_true", default=False,
+                        help="Monitor same-batch retrieval/edit gradient conflict during training and export averaged statistics.")
+    parser.add_argument("--conflict-probe-every", type=int, default=0,
+                        help="Collect one gradient-conflict probe every N optimizer steps. Set <=0 to disable sampling.")
+    parser.add_argument("--conflict-probe-start", type=int, default=1,
+                        help="First optimizer step to start collecting gradient-conflict probes.")
+    parser.add_argument("--conflict-probe-end", type=int, default=0,
+                        help="Last optimizer step (inclusive) to collect gradient-conflict probes. <=0 means no upper bound.")
+    parser.add_argument("--conflict-probe-output", type=str, default=None,
+                        help="Optional jsonl output path for gradient-conflict probe history.")
+    parser.add_argument("--conflict-probe-plot", type=str, default=None,
+                        help="Optional output path for the final layer-wise gradient-conflict figure.")
     parser.add_argument("--cirr-val-merge-base", type=str, default=None,
                         help="Full checkpoint used as the retrieval base when doing periodic merged CIRR validation.")
     parser.add_argument("--cirr-val-merge-density", type=float, default=0.9,

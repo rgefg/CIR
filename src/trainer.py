@@ -14,6 +14,7 @@ import torch.distributed as dist
 import logging
 import wandb
 import json
+from pathlib import Path
 
 from torch.cuda.amp import autocast
 from third_party.open_clip.clip import tokenize
@@ -490,6 +491,7 @@ def get_loss_lcom_cc3m(model, img2text, ref_images, instructions, modified_capti
     }
     aux = {
         "per_sample_retrieval_loss": per_sample_retrieval_loss.detach(),
+        "retrieval_local_logits": logits_per_query[:local_batch_size].detach(),
     }
     return loss, stats, aux
 
@@ -662,6 +664,10 @@ def get_loss_geo_text_branch(
     small_delta_ratio = float((~delta_valid).float().mean().detach().item()) if len(ctgt) > 0 else 0.0
     delta_norm_mean = float(delta_raw_norm.mean().detach().item()) if len(ctgt) > 0 else 0.0
 
+    valid_geo_logits_unit = None
+    if valid_count > 0:
+        valid_geo_logits_unit = (z_fwd[valid_mask] @ z_tgt[valid_mask].t()).detach()
+
     stats = {
         "loss_fwd": float(loss_fwd.detach().item()),
         "loss_rev": float(loss_rev.detach().item()),
@@ -678,13 +684,235 @@ def get_loss_geo_text_branch(
         "geo_small_delta_ratio": small_delta_ratio,
         "geo_delta_norm_mean": delta_norm_mean,
     }
-    return geom_loss, stats
+    aux = {
+        "geo_logits_unit": valid_geo_logits_unit,
+    }
+    return geom_loss, stats, aux
 
 
 def _normalized_lora_name(name):
     if name.startswith("module."):
         name = name[len("module."):]
     return name
+
+
+_TEXT_BLOCK_RE = re.compile(r"(?:^|\\.)transformer\\.resblocks\\.(\\d+)\\.")
+
+
+def _extract_text_block_index(name):
+    match = _TEXT_BLOCK_RE.search(_normalized_lora_name(name))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _collect_text_conflict_stats(retrieval_model, geo_text_model):
+    retrieval_grads = {}
+    for name, param in retrieval_model.named_parameters():
+        norm_name = _normalized_lora_name(name)
+        if norm_name.startswith("visual."):
+            continue
+        if not (norm_name.endswith(".A") or norm_name.endswith(".B")):
+            continue
+        if param.grad is None:
+            continue
+        block_idx = _extract_text_block_index(norm_name)
+        if block_idx is None:
+            continue
+        retrieval_grads[norm_name] = param.grad.detach()
+
+    block_cosines = {i: [] for i in range(12)}
+    for name, param in geo_text_model.named_parameters():
+        norm_name = _normalized_lora_name(name)
+        if not (norm_name.endswith(".A") or norm_name.endswith(".B")):
+            continue
+        if param.grad is None:
+            continue
+        block_idx = _extract_text_block_index(norm_name)
+        if block_idx is None:
+            continue
+        retr_grad = retrieval_grads.get(norm_name)
+        if retr_grad is None:
+            continue
+        geo_flat = param.grad.detach().reshape(-1).float()
+        retr_flat = retr_grad.reshape(-1).float()
+        denom = geo_flat.norm() * retr_flat.norm()
+        if float(denom.item()) <= 1e-12:
+            continue
+        cos_val = float(torch.dot(geo_flat, retr_flat).div(denom).item())
+        block_cosines[block_idx].append(cos_val)
+
+    block_means = []
+    negative_parts = []
+    for block_idx in range(12):
+        vals = block_cosines[block_idx]
+        if vals:
+            mean_val = float(sum(vals) / len(vals))
+            block_means.append(mean_val)
+            negative_parts.append(max(0.0, -mean_val))
+        else:
+            block_means.append(float("nan"))
+    valid_block_vals = [v for v in block_means if v == v]
+    return {
+        "block_means": block_means,
+        "gci": float(sum(negative_parts) / len(valid_block_vals)) if valid_block_vals else 0.0,
+        "valid_blocks": len(valid_block_vals),
+        "neg_block_ratio": float(sum(1 for v in valid_block_vals if v < 0.0) / len(valid_block_vals))
+        if valid_block_vals
+        else 0.0,
+    }
+
+
+def _mean_softmax_entropy(logits):
+    if logits is None or logits.numel() == 0:
+        return None
+    probs = torch.softmax(logits.float(), dim=-1)
+    entropy = -(probs * probs.clamp_min(1e-12).log()).sum(dim=-1).mean()
+    return float(entropy.detach().item())
+
+
+def _compute_eteg(retrieval_aux, geo_aux, logit_scale):
+    retrieval_logits = retrieval_aux.get("retrieval_local_logits") if retrieval_aux else None
+    geo_logits_unit = geo_aux.get("geo_logits_unit") if geo_aux else None
+    retrieval_entropy = _mean_softmax_entropy(retrieval_logits)
+    geo_entropy = None
+    if geo_logits_unit is not None and geo_logits_unit.numel() > 0:
+        geo_entropy = _mean_softmax_entropy(float(logit_scale) * geo_logits_unit.float())
+    eteg = None
+    if retrieval_entropy is not None and geo_entropy is not None:
+        eteg = float(geo_entropy - retrieval_entropy)
+    return {
+        "retrieval_entropy": retrieval_entropy,
+        "geo_entropy": geo_entropy,
+        "eteg": eteg,
+    }
+
+
+def _init_conflict_probe_state(args):
+    if not bool(getattr(args, "conflict_probe", False)):
+        return None
+    history_path = getattr(args, "conflict_probe_output", None)
+    if not history_path:
+        history_path = os.path.join(args.logs, args.name, "gradient_conflict_history.jsonl")
+    layerwise_path = os.path.join(os.path.dirname(history_path), "gradient_conflict_layerwise.tsv")
+    summary_path = os.path.join(os.path.dirname(history_path), "gradient_conflict_summary.json")
+    plot_path = getattr(args, "conflict_probe_plot", None)
+    if not plot_path:
+        plot_path = os.path.join(os.path.dirname(history_path), "gradient_conflict_plot.png")
+    Path(os.path.dirname(history_path)).mkdir(parents=True, exist_ok=True)
+    return {
+        "history_path": history_path,
+        "layerwise_path": layerwise_path,
+        "summary_path": summary_path,
+        "plot_path": plot_path,
+        "count": 0,
+        "before_sum": [0.0] * 12,
+        "after_sum": [0.0] * 12,
+        "before_count": [0] * 12,
+        "after_count": [0] * 12,
+        "gci_before_sum": 0.0,
+        "gci_after_sum": 0.0,
+        "ret_entropy_sum": 0.0,
+        "ret_entropy_count": 0,
+        "geo_entropy_sum": 0.0,
+        "geo_entropy_count": 0,
+        "eteg_sum": 0.0,
+        "eteg_count": 0,
+    }
+
+
+def _append_conflict_probe_record(probe_state, record):
+    with open(probe_state["history_path"], "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    probe_state["count"] += 1
+    for idx, val in enumerate(record["block_cos_before"]):
+        if val is None:
+            continue
+        probe_state["before_sum"][idx] += float(val)
+        probe_state["before_count"][idx] += 1
+    for idx, val in enumerate(record["block_cos_after"]):
+        if val is None:
+            continue
+        probe_state["after_sum"][idx] += float(val)
+        probe_state["after_count"][idx] += 1
+    probe_state["gci_before_sum"] += float(record["gci_before"])
+    probe_state["gci_after_sum"] += float(record["gci_after"])
+    if record.get("retrieval_entropy") is not None:
+        probe_state["ret_entropy_sum"] += float(record["retrieval_entropy"])
+        probe_state["ret_entropy_count"] += 1
+    if record.get("geo_entropy") is not None:
+        probe_state["geo_entropy_sum"] += float(record["geo_entropy"])
+        probe_state["geo_entropy_count"] += 1
+    if record.get("eteg") is not None:
+        probe_state["eteg_sum"] += float(record["eteg"])
+        probe_state["eteg_count"] += 1
+
+
+def _finalize_conflict_probe(probe_state):
+    if probe_state is None or probe_state["count"] <= 0:
+        return
+    before_mean = [
+        (probe_state["before_sum"][i] / probe_state["before_count"][i]) if probe_state["before_count"][i] > 0 else None
+        for i in range(12)
+    ]
+    after_mean = [
+        (probe_state["after_sum"][i] / probe_state["after_count"][i]) if probe_state["after_count"][i] > 0 else None
+        for i in range(12)
+    ]
+    with open(probe_state["layerwise_path"], "w", encoding="utf-8") as f:
+        f.write("block\tcos_before\tcos_after\n")
+        for idx in range(12):
+            before_str = "" if before_mean[idx] is None else f"{before_mean[idx]:.6f}"
+            after_str = "" if after_mean[idx] is None else f"{after_mean[idx]:.6f}"
+            f.write(f"{idx}\t{before_str}\t{after_str}\n")
+
+    summary = {
+        "num_probe_steps": int(probe_state["count"]),
+        "gci_before_mean": float(probe_state["gci_before_sum"] / probe_state["count"]),
+        "gci_after_mean": float(probe_state["gci_after_sum"] / probe_state["count"]),
+        "retrieval_entropy_mean": (
+            float(probe_state["ret_entropy_sum"] / probe_state["ret_entropy_count"])
+            if probe_state["ret_entropy_count"] > 0
+            else None
+        ),
+        "geo_entropy_mean": (
+            float(probe_state["geo_entropy_sum"] / probe_state["geo_entropy_count"])
+            if probe_state["geo_entropy_count"] > 0
+            else None
+        ),
+        "eteg_mean": (
+            float(probe_state["eteg_sum"] / probe_state["eteg_count"])
+            if probe_state["eteg_count"] > 0
+            else None
+        ),
+        "block_cos_before_mean": before_mean,
+        "block_cos_after_mean": after_mean,
+    }
+    with open(probe_state["summary_path"], "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        x = list(range(12))
+        y_before = [float("nan") if v is None else v for v in before_mean]
+        y_after = [float("nan") if v is None else v for v in after_mean]
+        plt.figure(figsize=(8, 4.5))
+        plt.plot(x, y_before, marker="o", label="Before Projection", linewidth=2)
+        plt.plot(x, y_after, marker="o", label="After Projection", linewidth=2)
+        plt.axhline(0.0, color="black", linewidth=1, linestyle="--")
+        plt.xticks(x)
+        plt.xlabel("Text ResBlock")
+        plt.ylabel("Gradient Cosine")
+        plt.title("Layer-wise Gradient Conflict")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(probe_state["plot_path"], dpi=200)
+        plt.close()
+    except Exception as exc:
+        logging.warning(f"Failed to render gradient conflict plot: {exc}")
 
 
 def project_geo_gradients(retrieval_model, geo_text_model):
@@ -841,6 +1069,7 @@ def train(
     ]
     ema_enabled = any(ema is not None for _, ema in ema_pairs)
     ema_eval_enabled = bool(getattr(args, "ema_eval", False) and ema_enabled)
+    conflict_probe_state = _init_conflict_probe_state(args) if is_master(args) else None
     if ema_enabled and is_master(args):
         logging.info(f"EMA enabled for training. ema_eval={ema_eval_enabled}")
 
@@ -945,7 +1174,7 @@ def train(
                     with _geo_rng_context(geo_rng_state, enabled=True):
                         with autocast():
                             if geo_tgt:
-                                geo_loss, geo_stats = get_loss_geo_text_branch(
+                                geo_loss, geo_stats, geo_aux = get_loss_geo_text_branch(
                                     g,
                                     geo_src,
                                     geo_tgt,
@@ -971,6 +1200,7 @@ def train(
                                     "geo_small_delta_ratio": 0.0,
                                     "geo_delta_norm_mean": 0.0,
                                 }
+                                geo_aux = {"geo_logits_unit": None}
                             weighted_geo_loss = geo_loss * geo_weight
                         if torch.isfinite(weighted_geo_loss.detach()).all():
                             geo_scaler.scale(weighted_geo_loss / float(accum_steps)).backward()
@@ -980,7 +1210,7 @@ def train(
                             geo_stats["geo_skipped_nonfinite"] = 1.0
                             weighted_geo_loss = None
                 else:
-                    geo_loss, geo_stats, weighted_geo_loss = None, None, None
+                    geo_loss, geo_stats, geo_aux, weighted_geo_loss = None, None, None, None
             else:
                 retrieval_loss, retrieval_stats, retrieval_aux = get_loss_lcom_cc3m(
                     m,
@@ -1007,7 +1237,7 @@ def train(
                     geo_rev = _select_batch_items(reverse_instructions, geo_indices)
                     with _geo_rng_context(geo_rng_state, enabled=True):
                         if geo_tgt:
-                            geo_loss, geo_stats = get_loss_geo_text_branch(
+                            geo_loss, geo_stats, geo_aux = get_loss_geo_text_branch(
                                 g,
                                 geo_src,
                                 geo_tgt,
@@ -1033,10 +1263,11 @@ def train(
                                 "geo_small_delta_ratio": 0.0,
                                 "geo_delta_norm_mean": 0.0,
                             }
+                            geo_aux = {"geo_logits_unit": None}
                         weighted_geo_loss = geo_loss * geo_weight
                         (weighted_geo_loss / float(accum_steps)).backward()
                 else:
-                    geo_loss, geo_stats, weighted_geo_loss = None, None, None
+                    geo_loss, geo_stats, geo_aux, weighted_geo_loss = None, None, None, None
 
             loss_stats = {
                 "loss_retrieval": float(retrieval_loss.detach().item()),
@@ -1111,7 +1342,58 @@ def train(
                 geo_step_ready
                 and getattr(args, "geo_conflict_projection", False)
             ):
+                conflict_probe_every = int(getattr(args, "conflict_probe_every", 0))
+                conflict_probe_start = int(getattr(args, "conflict_probe_start", 0))
+                conflict_probe_end = int(getattr(args, "conflict_probe_end", 0))
+                probe_enabled = bool(getattr(args, "conflict_probe", False))
+                should_probe = (
+                    probe_enabled
+                    and conflict_probe_state is not None
+                    and conflict_probe_every > 0
+                    and (step + 1) >= max(conflict_probe_start, 1)
+                    and (conflict_probe_end <= 0 or (step + 1) <= conflict_probe_end)
+                    and (((step + 1) - max(conflict_probe_start, 1)) % conflict_probe_every == 0)
+                )
+                before_conflict = None
+                eteg_stats = None
+                if should_probe:
+                    before_conflict = _collect_text_conflict_stats(m, g)
+                    logit_scale_probe = torch.clamp(m.logit_scale.exp().detach(), max=100.0).mean().item()
+                    eteg_stats = _compute_eteg(retrieval_aux, geo_aux, logit_scale_probe)
                 projection_stats = project_geo_gradients(m, g)
+                if should_probe and before_conflict is not None:
+                    after_conflict = _collect_text_conflict_stats(m, g)
+                    record = {
+                        "epoch": int(epoch),
+                        "step": int(step + 1),
+                        "gci_before": float(before_conflict["gci"]),
+                        "gci_after": float(after_conflict["gci"]),
+                        "neg_block_ratio_before": float(before_conflict["neg_block_ratio"]),
+                        "neg_block_ratio_after": float(after_conflict["neg_block_ratio"]),
+                        "block_cos_before": [
+                            None if v != v else float(v) for v in before_conflict["block_means"]
+                        ],
+                        "block_cos_after": [
+                            None if v != v else float(v) for v in after_conflict["block_means"]
+                        ],
+                        "retrieval_entropy": None if eteg_stats is None else eteg_stats["retrieval_entropy"],
+                        "geo_entropy": None if eteg_stats is None else eteg_stats["geo_entropy"],
+                        "eteg": None if eteg_stats is None else eteg_stats["eteg"],
+                    }
+                    _append_conflict_probe_record(conflict_probe_state, record)
+                    if loss_stats is None:
+                        loss_stats = {}
+                    loss_stats["gci_before"] = float(before_conflict["gci"])
+                    loss_stats["gci_after"] = float(after_conflict["gci"])
+                    loss_stats["neg_block_before"] = float(before_conflict["neg_block_ratio"])
+                    loss_stats["neg_block_after"] = float(after_conflict["neg_block_ratio"])
+                    if eteg_stats is not None:
+                        if eteg_stats["retrieval_entropy"] is not None:
+                            loss_stats["retrieval_entropy"] = float(eteg_stats["retrieval_entropy"])
+                        if eteg_stats["geo_entropy"] is not None:
+                            loss_stats["geo_entropy"] = float(eteg_stats["geo_entropy"])
+                        if eteg_stats["eteg"] is not None:
+                            loss_stats["eteg"] = float(eteg_stats["eteg"])
                 if loss_stats is None:
                     loss_stats = {}
                 loss_stats.update(projection_stats)
@@ -1194,6 +1476,12 @@ def train(
                         log_msg += f"\tz_fwd_rev_cos: {loss_stats['z_fwd_rev_cos']:.4f}"
                     if "geo_conflict_ratio" in loss_stats:
                         log_msg += f"\tgeo_conflict: {loss_stats['geo_conflict_ratio']:.2%}"
+                    if "gci_before" in loss_stats:
+                        log_msg += f"\tgci_before: {loss_stats['gci_before']:.4f}"
+                    if "gci_after" in loss_stats:
+                        log_msg += f"\tgci_after: {loss_stats['gci_after']:.4f}"
+                    if "eteg" in loss_stats:
+                        log_msg += f"\teteg: {loss_stats['eteg']:.4f}"
                     if "geo_valid_ratio" in loss_stats:
                         log_msg += f"\tgeo_valid: {loss_stats['geo_valid_ratio']:.2%}"
                     if "geo_missing_src_ratio" in loss_stats:
@@ -1380,3 +1668,6 @@ def train(
                     _save_step_checkpoint(global_step)
 
             update_idx += 1
+
+    if is_master(args):
+        _finalize_conflict_probe(conflict_probe_state)

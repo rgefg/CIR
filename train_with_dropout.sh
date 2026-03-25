@@ -6,7 +6,7 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 DIST_URL="${DIST_URL:-tcp://127.0.0.1:6147}"
 TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-0,1}}"
-RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1700_QKV_StrictLoss}"
+RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1700_QKV_StrictLoss_dropout0.5}"
 EVAL_GPU="${EVAL_GPU:-2}"
 
 TRAIN_JSON="${TRAIN_JSON:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2_with_reverse.jsonl}"
@@ -73,6 +73,10 @@ GEO_DELTA_MIN_NORM="${GEO_DELTA_MIN_NORM:-1e-3}"
 GEO_SAMPLING_MODE="${GEO_SAMPLING_MODE:-hard}"
 GEO_TOPK="${GEO_TOPK:-8}"
 INSTRUCTION_DROPOUT_PROB="${INSTRUCTION_DROPOUT_PROB:-0.5}"
+CONFLICT_PROBE="${CONFLICT_PROBE:-0}"
+CONFLICT_PROBE_EVERY="${CONFLICT_PROBE_EVERY:-25}"
+CONFLICT_PROBE_START="${CONFLICT_PROBE_START:-25}"
+CONFLICT_PROBE_END="${CONFLICT_PROBE_END:-0}"
 ENABLE_EMA_EVAL="${ENABLE_EMA_EVAL:-1}"
 ENABLE_EMA_SAVE_CHECKPOINTS="${ENABLE_EMA_SAVE_CHECKPOINTS:-1}"
 
@@ -131,6 +135,7 @@ echo "EMA save checkpoints: ${ENABLE_EMA_SAVE_CHECKPOINTS}"
 echo "Geo strict loss: reverse_weight=${GEO_REVERSE_WEIGHT}, reverse_margin=${GEO_REVERSE_MARGIN}, zero_loss_weight=${GEO_ZERO_LOSS_WEIGHT}"
 echo "Geo sampling: mode=${GEO_SAMPLING_MODE}, topk=${GEO_TOPK}"
 echo "Instruction dropout prob: ${INSTRUCTION_DROPOUT_PROB}"
+echo "Conflict probe: enabled=${CONFLICT_PROBE}, every=${CONFLICT_PROBE_EVERY}, start=${CONFLICT_PROBE_START}, end=${CONFLICT_PROBE_END}"
 echo "Geo norm eps: embed=${GEO_EMBED_NORM_EPS}, delta=${GEO_DELTA_NORM_EPS}, min_delta=${GEO_DELTA_MIN_NORM}"
 echo "Watcher isolation: affinity=${WATCHER_CPU_AFFINITY}, nice=${WATCHER_NICE}, cpu_threads=${WATCHER_CPU_THREADS}, eval_workers=${WATCHER_EVAL_WORKERS}"
 
@@ -176,6 +181,14 @@ if [[ "${ENABLE_EMA_EVAL}" == "1" ]]; then
 fi
 if [[ "${ENABLE_EMA_SAVE_CHECKPOINTS}" == "1" ]]; then
   EXTRA_ARGS+=(--ema-save-checkpoints)
+fi
+if [[ "${CONFLICT_PROBE}" == "1" ]]; then
+  EXTRA_ARGS+=(
+    --conflict-probe
+    --conflict-probe-every "${CONFLICT_PROBE_EVERY}"
+    --conflict-probe-start "${CONFLICT_PROBE_START}"
+    --conflict-probe-end "${CONFLICT_PROBE_END}"
+  )
 fi
 
 CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \

@@ -36,8 +36,7 @@
 
 我们只展示：
 - 同一张图上 before / after 两条曲线
-或
-- 每层一个 before-after 柱状对比
+
 
 目标不是证明冲突完全消失，而是证明：
 - 负冲突减少
@@ -73,21 +72,22 @@
 
 这是主指标，直接对应你要讲的故事。
 
-### 指标 2：Instruction Distribution Divergence (IDD)
-为了像“条件熵”那样给一个统计学支撑，但又不把实验做复杂，我建议用：
-- retrieval instruction 分布 vs edit/reverse instruction 分布 的 `Jensen-Shannon Divergence (JSD)`
+### 指标 2：Effective Target Entropy Gap (ETEG)
+为了像“条件熵差异”那样给一个统计学支撑，同时又直接和当前检索任务绑定，本轮改用：
+- retrieval query 与 edit query 在同一候选目标集上的 softmax 熵差
 
 做法：
-- 用 BPE token 或 unigram/bigram 统计
-- 得到两套 token 分布 `P_ret` 和 `P_edit`
-- 计算 `IDD = JSD(P_ret || P_edit)`
+- retrieval 分支：对 `q_ret` 和同 batch target 集合算 `softmax(sim(q_ret, T))`
+- edit 分支：对 `q_edit` 和同 batch target 集合算 `softmax(sim(q_edit, T))`
+- 分别求平均熵 `H_ret` 与 `H_edit`
+- 计算 `ETEG = H_edit - H_ret`
 
 解释：
-- `IDD` 越大，说明两个分支处理的文本分布差异越大
-- 它不能直接替代梯度冲突，但可以像“条件熵差异”那样，作为冲突来源的统计解释
+- `ETEG` 越大，说明 edit 分支在同一共享表征空间里对应的目标分布更“平”、更不确定
+- 它比单纯 token 统计更接近参考文章里的“条件熵差异”讲法
 
 因此本轮故事可以写成：
-- 两个分支的文本分布本来就不同（`IDD` 大）
+- 两个分支在共享表征空间里的目标熵不同（`ETEG`）
 - 共享 text encoder 时产生明显梯度冲突（逐层 conflict 图 + `GCI`）
 - 梯度投影能缓解冲突（`GCI` 下降）
 - 训练后 merge 也能进一步减轻在线共享训练的冲突后果（结果表提升）
@@ -106,8 +106,8 @@
 - 报一个 `GCI before` 和 `GCI after`
 
 ### Step 3
-计算一个简单的 `IDD`：
-- retrieval instruction vs edit/reverse instruction 的 JSD
+计算一个简单的 `ETEG`：
+- retrieval query vs edit query 的同 batch softmax 熵差
 - 作为“为什么会冲突”的统计解释
 
 ### Step 4
@@ -116,20 +116,13 @@
 - projection 版本
 - merge 版本
 
-不再额外扩展到：
-- visual tower
-- img2text
-- 多阶段 time-series
-- ret-ret / geo-geo baseline 大量消融
-- 复杂 entropy 家族指标
-
 ## 5. 最终交付物
 
 本轮只需要这几样：
 1. 一张逐层梯度 conflict 图
 2. 一张投影前后对比图
 3. 一个 `GCI` 标量前后对比
-4. 一个 `IDD` 标量
+4. 一个 `ETEG` 标量
 5. 一张最终结果表（standalone / projection / merge）
 
 ## 6. 结论模板
