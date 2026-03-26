@@ -697,6 +697,7 @@ def _normalized_lora_name(name):
 
 
 _TEXT_BLOCK_RE = re.compile(r"(?:^|\.)transformer\.resblocks\.(\d+)\.")
+_TEXT_CPROJ_RE = re.compile(r"(?:^|\.)transformer\.resblocks\.(\d+)\.mlp\.c_proj\.(A|B)$")
 
 
 def _extract_text_block_index(name):
@@ -706,61 +707,135 @@ def _extract_text_block_index(name):
     return int(match.group(1))
 
 
-def _collect_text_conflict_stats(retrieval_model, geo_text_model):
-    retrieval_grads = {}
-    for name, param in retrieval_model.named_parameters():
+def _extract_text_cproj_effective_grads(model):
+    named_modules = {_normalized_lora_name(name): module for name, module in model.named_modules()}
+    entries = {}
+    for name, param in model.named_parameters():
         norm_name = _normalized_lora_name(name)
-        if norm_name.startswith("visual."):
+        match = _TEXT_CPROJ_RE.search(norm_name)
+        if not match:
             continue
-        if not (norm_name.endswith(".A") or norm_name.endswith(".B")):
-            continue
-        if param.grad is None:
-            continue
-        block_idx = _extract_text_block_index(norm_name)
-        if block_idx is None:
-            continue
-        retrieval_grads[norm_name] = param.grad.detach()
+        block_idx = int(match.group(1))
+        part = match.group(2)
+        prefix = norm_name.rsplit(".", 1)[0]
+        entry = entries.setdefault(block_idx, {"prefix": prefix, "scaling": 1.0})
+        entry[part] = param.detach()
+        if param.grad is not None:
+            entry[f"d{part}"] = param.grad.detach()
+        module = named_modules.get(prefix)
+        if module is not None and hasattr(module, "scaling"):
+            entry["scaling"] = float(module.scaling)
 
-    block_cosines = {i: [] for i in range(12)}
-    for name, param in geo_text_model.named_parameters():
-        norm_name = _normalized_lora_name(name)
-        if not (norm_name.endswith(".A") or norm_name.endswith(".B")):
+    block_vectors = {}
+    for block_idx, entry in entries.items():
+        if not all(key in entry for key in ("A", "B", "dA", "dB")):
             continue
-        if param.grad is None:
-            continue
-        block_idx = _extract_text_block_index(norm_name)
-        if block_idx is None:
-            continue
-        retr_grad = retrieval_grads.get(norm_name)
-        if retr_grad is None:
-            continue
-        geo_flat = param.grad.detach().reshape(-1).float()
-        retr_flat = retr_grad.reshape(-1).float()
-        denom = geo_flat.norm() * retr_flat.norm()
-        if float(denom.item()) <= 1e-12:
-            continue
-        cos_val = float(torch.dot(geo_flat, retr_flat).div(denom).item())
-        block_cosines[block_idx].append(cos_val)
+        a = entry["A"].float()
+        b = entry["B"].float()
+        da = entry["dA"].float()
+        db = entry["dB"].float()
+        delta_grad = (db @ a) + (b @ da)
+        scaling = float(entry.get("scaling", 1.0))
+        if scaling != 1.0:
+            delta_grad = delta_grad * scaling
+        block_vectors[block_idx] = delta_grad.reshape(-1).detach().cpu()
+    return block_vectors
 
-    block_means = []
-    negative_parts = []
-    for block_idx in range(12):
-        vals = block_cosines[block_idx]
-        if vals:
-            mean_val = float(sum(vals) / len(vals))
-            block_means.append(mean_val)
-            negative_parts.append(max(0.0, -mean_val))
+
+def _cosine_or_none(vec_a, vec_b):
+    if vec_a is None or vec_b is None:
+        return None
+    a = vec_a.float()
+    b = vec_b.float()
+    denom = a.norm() * b.norm()
+    if float(denom.item()) <= 1e-12:
+        return None
+    return float(torch.dot(a, b).div(denom).item())
+
+
+def _project_block_vector(retrieval_vec, edit_vec):
+    if retrieval_vec is None or edit_vec is None:
+        return None
+    proj = edit_vec.clone().float()
+    retr = retrieval_vec.float()
+    dot_val = torch.dot(proj, retr)
+    if float(dot_val.item()) < 0.0:
+        retr_norm_sq = torch.dot(retr, retr)
+        if float(retr_norm_sq.item()) > 1e-12:
+            proj = proj - (dot_val / retr_norm_sq) * retr
+    return proj
+
+
+def _subset_images(images, indices):
+    if indices is None:
+        return images
+    if len(indices) == 0:
+        return images[:0]
+    index_tensor = torch.as_tensor(indices, device=images.device, dtype=torch.long)
+    return images.index_select(0, index_tensor)
+
+
+def _probe_modified_caption_text(x):
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    if isinstance(x, dict):
+        for key in ("modified_caption", "caption", "text", "value", "en", "description", "content"):
+            if key in x and isinstance(x[key], str):
+                return x[key]
+        return ""
+    if isinstance(x, (list, tuple)):
+        for value in x:
+            extracted = _probe_modified_caption_text(value)
+            if extracted:
+                return extracted
+        return ""
+    return str(x)
+
+
+def get_loss_lcom_textprobe_cc3m(model, img2text, ref_images, instructions, modified_captions, loss_fn, args):
+    device = ref_images.device
+    with torch.no_grad():
+        image_features = model.encode_image(ref_images)
+        token_features = img2text(image_features).detach()
+
+    placeholder = getattr(args, "prompt_placeholder", "*")
+    placeholder_token_id = int(tokenize([placeholder])[0][1].item())
+    prompts = []
+    for inst in instructions:
+        inst_str = _to_text(inst).strip()
+        if not inst_str:
+            prompts.append(f"a photo of {placeholder}")
         else:
-            block_means.append(float("nan"))
-    valid_block_vals = [v for v in block_means if v == v]
-    return {
-        "block_means": block_means,
-        "gci": float(sum(negative_parts) / len(valid_block_vals)) if valid_block_vals else 0.0,
-        "valid_blocks": len(valid_block_vals),
-        "neg_block_ratio": float(sum(1 for v in valid_block_vals if v < 0.0) / len(valid_block_vals))
-        if valid_block_vals
-        else 0.0,
-    }
+            prompts.append(f"a photo of {placeholder} and {inst_str}")
+    prompt_tokens = tokenize(prompts, truncate=True).to(device, non_blocking=True)
+    query_features = model.encode_text_img_vis(prompt_tokens, token_features, split_ind=placeholder_token_id)
+    query_features = query_features / query_features.norm(dim=-1, keepdim=True)
+
+    cap_tokens = tokenize([_probe_modified_caption_text(x) for x in modified_captions], truncate=True).to(device, non_blocking=True)
+    cap_features = model.encode_text(cap_tokens)
+    cap_features = cap_features / cap_features.norm(dim=-1, keepdim=True)
+    logit_scale = torch.clamp(model.logit_scale.exp(), max=100.0).mean()
+
+    if args.distributed and args.aggregate:
+        world_size = dist.get_world_size()
+        rank = dist.get_rank()
+        gathered_q = [torch.zeros_like(query_features) for _ in range(world_size)]
+        gathered_c = [torch.zeros_like(cap_features) for _ in range(world_size)]
+        dist.all_gather(gathered_q, query_features)
+        dist.all_gather(gathered_c, cap_features)
+        all_q = torch.cat([query_features] + gathered_q[:rank] + gathered_q[rank + 1 :])
+        all_c = torch.cat([cap_features] + gathered_c[:rank] + gathered_c[rank + 1 :])
+    else:
+        all_q, all_c = query_features, cap_features
+
+    logits_per_query = logit_scale * (all_q @ all_c.t())
+    logits_per_caption = logits_per_query.t()
+    targets = torch.arange(all_q.size(0), device=all_q.device, dtype=torch.long)
+    loss_q2c = loss_fn(logits_per_query, targets)
+    loss_c2q = loss_fn(logits_per_caption, targets)
+    return (loss_q2c + loss_c2q) / 2.0
 
 
 def _mean_softmax_entropy(logits):
@@ -797,8 +872,6 @@ def _init_conflict_probe_state(args):
     layerwise_path = os.path.join(os.path.dirname(history_path), "gradient_conflict_layerwise.tsv")
     summary_path = os.path.join(os.path.dirname(history_path), "gradient_conflict_summary.json")
     plot_path = getattr(args, "conflict_probe_plot", None)
-    if not plot_path:
-        plot_path = os.path.join(os.path.dirname(history_path), "gradient_conflict_plot.png")
     Path(os.path.dirname(history_path)).mkdir(parents=True, exist_ok=True)
     return {
         "history_path": history_path,
@@ -806,90 +879,104 @@ def _init_conflict_probe_state(args):
         "summary_path": summary_path,
         "plot_path": plot_path,
         "count": 0,
-        "before_sum": [0.0] * 12,
-        "after_sum": [0.0] * 12,
-        "before_count": [0] * 12,
-        "after_count": [0] * 12,
-        "gci_before_sum": 0.0,
-        "gci_after_sum": 0.0,
-        "ret_entropy_sum": 0.0,
-        "ret_entropy_count": 0,
-        "geo_entropy_sum": 0.0,
-        "geo_entropy_count": 0,
-        "eteg_sum": 0.0,
-        "eteg_count": 0,
+        "ret_sum": [None] * 12,
+        "edit_sum": [None] * 12,
+        "edit_proj_sum": [None] * 12,
+        "base_a_sum": [None] * 12,
+        "base_b_sum": [None] * 12,
+        "ret_count": [0] * 12,
+        "edit_count": [0] * 12,
+        "edit_proj_count": [0] * 12,
+        "base_a_count": [0] * 12,
+        "base_b_count": [0] * 12,
     }
 
 
 def _append_conflict_probe_record(probe_state, record):
+    history_record = {k: v for k, v in record.items() if not k.endswith("_vectors")}
     with open(probe_state["history_path"], "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        f.write(json.dumps(history_record, ensure_ascii=False) + "\n")
     probe_state["count"] += 1
-    for idx, val in enumerate(record["block_cos_before"]):
-        if val is None:
-            continue
-        probe_state["before_sum"][idx] += float(val)
-        probe_state["before_count"][idx] += 1
-    for idx, val in enumerate(record["block_cos_after"]):
-        if val is None:
-            continue
-        probe_state["after_sum"][idx] += float(val)
-        probe_state["after_count"][idx] += 1
-    probe_state["gci_before_sum"] += float(record["gci_before"])
-    probe_state["gci_after_sum"] += float(record["gci_after"])
-    if record.get("retrieval_entropy") is not None:
-        probe_state["ret_entropy_sum"] += float(record["retrieval_entropy"])
-        probe_state["ret_entropy_count"] += 1
-    if record.get("geo_entropy") is not None:
-        probe_state["geo_entropy_sum"] += float(record["geo_entropy"])
-        probe_state["geo_entropy_count"] += 1
-    if record.get("eteg") is not None:
-        probe_state["eteg_sum"] += float(record["eteg"])
-        probe_state["eteg_count"] += 1
+    vector_groups = (
+        ("ret_sum", "ret_count", record.get("ret_vectors", {})),
+        ("edit_sum", "edit_count", record.get("edit_vectors", {})),
+        ("edit_proj_sum", "edit_proj_count", record.get("edit_proj_vectors", {})),
+        ("base_a_sum", "base_a_count", record.get("base_a_vectors", {})),
+        ("base_b_sum", "base_b_count", record.get("base_b_vectors", {})),
+    )
+    for sum_key, count_key, vectors in vector_groups:
+        for idx, vec in vectors.items():
+            if vec is None:
+                continue
+            vec_cpu = vec.detach().cpu().float()
+            if probe_state[sum_key][idx] is None:
+                probe_state[sum_key][idx] = vec_cpu.clone()
+            else:
+                probe_state[sum_key][idx].add_(vec_cpu)
+            probe_state[count_key][idx] += 1
 
 
 def _finalize_conflict_probe(probe_state):
     if probe_state is None or probe_state["count"] <= 0:
         return
-    before_mean = [
-        (probe_state["before_sum"][i] / probe_state["before_count"][i]) if probe_state["before_count"][i] > 0 else None
-        for i in range(12)
-    ]
-    after_mean = [
-        (probe_state["after_sum"][i] / probe_state["after_count"][i]) if probe_state["after_count"][i] > 0 else None
-        for i in range(12)
-    ]
+    s_base_vals = []
+    s_cross_before_vals = []
+    s_cross_after_vals = []
+    gc_before_vals = []
+    gc_after_vals = []
     with open(probe_state["layerwise_path"], "w", encoding="utf-8") as f:
-        f.write("block\tcos_before\tcos_after\n")
+        f.write("block\ts_base\ts_cross_before\ts_cross_after\tgc_before\tgc_after\n")
         for idx in range(12):
-            before_str = "" if before_mean[idx] is None else f"{before_mean[idx]:.6f}"
-            after_str = "" if after_mean[idx] is None else f"{after_mean[idx]:.6f}"
-            f.write(f"{idx}\t{before_str}\t{after_str}\n")
+            ret_avg = None
+            edit_avg = None
+            edit_proj_avg = None
+            base_a_avg = None
+            base_b_avg = None
+            if probe_state["ret_sum"][idx] is not None and probe_state["ret_count"][idx] > 0:
+                ret_avg = probe_state["ret_sum"][idx] / float(probe_state["ret_count"][idx])
+            if probe_state["edit_sum"][idx] is not None and probe_state["edit_count"][idx] > 0:
+                edit_avg = probe_state["edit_sum"][idx] / float(probe_state["edit_count"][idx])
+            if probe_state["edit_proj_sum"][idx] is not None and probe_state["edit_proj_count"][idx] > 0:
+                edit_proj_avg = probe_state["edit_proj_sum"][idx] / float(probe_state["edit_proj_count"][idx])
+            if probe_state["base_a_sum"][idx] is not None and probe_state["base_a_count"][idx] > 0:
+                base_a_avg = probe_state["base_a_sum"][idx] / float(probe_state["base_a_count"][idx])
+            if probe_state["base_b_sum"][idx] is not None and probe_state["base_b_count"][idx] > 0:
+                base_b_avg = probe_state["base_b_sum"][idx] / float(probe_state["base_b_count"][idx])
+
+            s_base = _cosine_or_none(base_a_avg, base_b_avg)
+            s_cross_before = _cosine_or_none(ret_avg, edit_avg)
+            s_cross_after = _cosine_or_none(ret_avg, edit_proj_avg)
+            gc_before = None if (s_base is None or s_cross_before is None) else float(s_base - s_cross_before)
+            gc_after = None if (s_base is None or s_cross_after is None) else float(s_base - s_cross_after)
+
+            s_base_vals.append(s_base)
+            s_cross_before_vals.append(s_cross_before)
+            s_cross_after_vals.append(s_cross_after)
+            gc_before_vals.append(gc_before)
+            gc_after_vals.append(gc_after)
+
+            def _fmt(val):
+                return "" if val is None else f"{val:.6f}"
+
+            f.write(
+                f"{idx}\t{_fmt(s_base)}\t{_fmt(s_cross_before)}\t{_fmt(s_cross_after)}\t{_fmt(gc_before)}\t{_fmt(gc_after)}\n"
+            )
 
     summary = {
         "num_probe_steps": int(probe_state["count"]),
-        "gci_before_mean": float(probe_state["gci_before_sum"] / probe_state["count"]),
-        "gci_after_mean": float(probe_state["gci_after_sum"] / probe_state["count"]),
-        "retrieval_entropy_mean": (
-            float(probe_state["ret_entropy_sum"] / probe_state["ret_entropy_count"])
-            if probe_state["ret_entropy_count"] > 0
-            else None
-        ),
-        "geo_entropy_mean": (
-            float(probe_state["geo_entropy_sum"] / probe_state["geo_entropy_count"])
-            if probe_state["geo_entropy_count"] > 0
-            else None
-        ),
-        "eteg_mean": (
-            float(probe_state["eteg_sum"] / probe_state["eteg_count"])
-            if probe_state["eteg_count"] > 0
-            else None
-        ),
-        "block_cos_before_mean": before_mean,
-        "block_cos_after_mean": after_mean,
+        "s_base_mean": [None if v is None else float(v) for v in s_base_vals],
+        "s_cross_before_mean": [None if v is None else float(v) for v in s_cross_before_vals],
+        "s_cross_after_mean": [None if v is None else float(v) for v in s_cross_after_vals],
+        "gc_before_mean": [None if v is None else float(v) for v in gc_before_vals],
+        "gc_after_mean": [None if v is None else float(v) for v in gc_after_vals],
+        "gc_before_macro_mean": float(sum(v for v in gc_before_vals if v is not None) / max(1, sum(1 for v in gc_before_vals if v is not None))),
+        "gc_after_macro_mean": float(sum(v for v in gc_after_vals if v is not None) / max(1, sum(1 for v in gc_after_vals if v is not None))),
     }
     with open(probe_state["summary_path"], "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    if not probe_state.get("plot_path"):
+        return
 
     try:
         import matplotlib
@@ -897,22 +984,168 @@ def _finalize_conflict_probe(probe_state):
         import matplotlib.pyplot as plt
 
         x = list(range(12))
-        y_before = [float("nan") if v is None else v for v in before_mean]
-        y_after = [float("nan") if v is None else v for v in after_mean]
+        y_before = [float("nan") if v is None else v for v in gc_before_vals]
+        y_after = [float("nan") if v is None else v for v in gc_after_vals]
         plt.figure(figsize=(8, 4.5))
         plt.plot(x, y_before, marker="o", label="Before Projection", linewidth=2)
         plt.plot(x, y_after, marker="o", label="After Projection", linewidth=2)
-        plt.axhline(0.0, color="black", linewidth=1, linestyle="--")
         plt.xticks(x)
         plt.xlabel("Text ResBlock")
-        plt.ylabel("Gradient Cosine")
-        plt.title("Layer-wise Gradient Conflict")
+        plt.ylabel("Gradient Conflict")
+        plt.title("Layer-wise FFN c_proj Gradient Conflict")
         plt.legend()
         plt.tight_layout()
         plt.savefig(probe_state["plot_path"], dpi=200)
         plt.close()
     except Exception as exc:
         logging.warning(f"Failed to render gradient conflict plot: {exc}")
+
+
+def _run_unix_conflict_probe(
+    model,
+    img2text,
+    ref_images,
+    instructions,
+    modified_captions,
+    src_captions,
+    reverse_instructions,
+    loss_fn,
+    args,
+    step,
+):
+    if ref_images is None or ref_images.size(0) < 2:
+        return None
+
+    probe_seed = int(getattr(args, "seed", 0)) + 1000003 + int(step)
+    with torch.random.fork_rng(devices=_branch_cuda_devices(args), enabled=True):
+        torch.manual_seed(probe_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(probe_seed)
+
+        model.zero_grad(set_to_none=True)
+        img2text.zero_grad(set_to_none=True)
+
+        ret_loss = get_loss_lcom_textprobe_cc3m(
+            model,
+            img2text,
+            ref_images,
+            instructions,
+            modified_captions,
+            loss_fn,
+            args,
+        )
+        ret_loss.backward()
+        ret_vectors = _extract_text_cproj_effective_grads(model)
+
+        model.zero_grad(set_to_none=True)
+        img2text.zero_grad(set_to_none=True)
+
+        edit_loss, _, _ = get_loss_geo_text_branch(
+            model,
+            src_captions,
+            modified_captions,
+            instructions,
+            reverse_instructions,
+            args,
+        )
+        edit_loss.backward()
+        edit_vectors = _extract_text_cproj_effective_grads(model)
+
+        model.zero_grad(set_to_none=True)
+        img2text.zero_grad(set_to_none=True)
+
+        batch_size = ref_images.size(0)
+        perm = torch.randperm(batch_size, device=ref_images.device).detach().cpu().tolist()
+        split = max(1, batch_size // 2)
+        idx_a = perm[:split]
+        idx_b = perm[split:]
+        if len(idx_b) == 0:
+            idx_b = idx_a[-1:]
+            idx_a = idx_a[:-1]
+            if len(idx_a) == 0:
+                idx_a = idx_b
+
+        def _joint_loss(indices):
+            subset_images = _subset_images(ref_images, indices)
+            subset_instructions = _select_batch_items(instructions, indices)
+            subset_modified = _select_batch_items(modified_captions, indices)
+            subset_src = _select_batch_items(src_captions, indices)
+            subset_reverse = _select_batch_items(reverse_instructions, indices)
+            retrieval_loss = get_loss_lcom_textprobe_cc3m(
+                model,
+                img2text,
+                subset_images,
+                subset_instructions,
+                subset_modified,
+                loss_fn,
+                args,
+            )
+            geo_loss, _, _ = get_loss_geo_text_branch(
+                model,
+                subset_src,
+                subset_modified,
+                subset_instructions,
+                subset_reverse,
+                args,
+            )
+            return retrieval_loss + (float(getattr(args, "geo_weight", 1.0)) * geo_loss)
+
+        joint_loss_a = _joint_loss(idx_a)
+        joint_loss_a.backward()
+        base_a_vectors = _extract_text_cproj_effective_grads(model)
+
+        model.zero_grad(set_to_none=True)
+        img2text.zero_grad(set_to_none=True)
+
+        joint_loss_b = _joint_loss(idx_b)
+        joint_loss_b.backward()
+        base_b_vectors = _extract_text_cproj_effective_grads(model)
+
+        model.zero_grad(set_to_none=True)
+        img2text.zero_grad(set_to_none=True)
+
+    edit_proj_vectors = {}
+    for block_idx in range(12):
+        retr_vec = ret_vectors.get(block_idx)
+        edit_vec = edit_vectors.get(block_idx)
+        if retr_vec is None or edit_vec is None:
+            continue
+        edit_proj_vectors[block_idx] = _project_block_vector(retr_vec, edit_vec)
+
+    s_base = []
+    s_cross_before = []
+    s_cross_after = []
+    gc_before = []
+    gc_after = []
+    for block_idx in range(12):
+        s_base_val = _cosine_or_none(base_a_vectors.get(block_idx), base_b_vectors.get(block_idx))
+        s_cross_before_val = _cosine_or_none(ret_vectors.get(block_idx), edit_vectors.get(block_idx))
+        s_cross_after_val = _cosine_or_none(ret_vectors.get(block_idx), edit_proj_vectors.get(block_idx))
+        gc_before_val = None if (s_base_val is None or s_cross_before_val is None) else float(s_base_val - s_cross_before_val)
+        gc_after_val = None if (s_base_val is None or s_cross_after_val is None) else float(s_base_val - s_cross_after_val)
+        s_base.append(s_base_val)
+        s_cross_before.append(s_cross_before_val)
+        s_cross_after.append(s_cross_after_val)
+        gc_before.append(gc_before_val)
+        gc_after.append(gc_after_val)
+
+    valid_before = [v for v in gc_before if v is not None]
+    valid_after = [v for v in gc_after if v is not None]
+    return {
+        "step": int(step),
+        "s_base": s_base,
+        "s_cross_before": s_cross_before,
+        "s_cross_after": s_cross_after,
+        "gc_before": gc_before,
+        "gc_after": gc_after,
+        "gc_before_mean": float(sum(valid_before) / len(valid_before)) if valid_before else None,
+        "gc_after_mean": float(sum(valid_after) / len(valid_after)) if valid_after else None,
+        "ret_vectors": ret_vectors,
+        "edit_vectors": edit_vectors,
+        "edit_proj_vectors": edit_proj_vectors,
+        "base_a_vectors": base_a_vectors,
+        "base_b_vectors": base_b_vectors,
+    }
 
 
 def project_geo_gradients(retrieval_model, geo_text_model):
@@ -1334,6 +1567,7 @@ def train(
             step = num_updates_per_epoch * epoch + update_idx
             geo_step_ready = geo_optimizer is not None and g is not None
             projection_stats = {}
+            probe_metrics = None
             if args.precision == "amp":
                 retrieval_scaler.unscale_(optimizer)
                 if geo_step_ready:
@@ -1342,58 +1576,7 @@ def train(
                 geo_step_ready
                 and getattr(args, "geo_conflict_projection", False)
             ):
-                conflict_probe_every = int(getattr(args, "conflict_probe_every", 0))
-                conflict_probe_start = int(getattr(args, "conflict_probe_start", 0))
-                conflict_probe_end = int(getattr(args, "conflict_probe_end", 0))
-                probe_enabled = bool(getattr(args, "conflict_probe", False))
-                should_probe = (
-                    probe_enabled
-                    and conflict_probe_state is not None
-                    and conflict_probe_every > 0
-                    and (step + 1) >= max(conflict_probe_start, 1)
-                    and (conflict_probe_end <= 0 or (step + 1) <= conflict_probe_end)
-                    and (((step + 1) - max(conflict_probe_start, 1)) % conflict_probe_every == 0)
-                )
-                before_conflict = None
-                eteg_stats = None
-                if should_probe:
-                    before_conflict = _collect_text_conflict_stats(m, g)
-                    logit_scale_probe = torch.clamp(m.logit_scale.exp().detach(), max=100.0).mean().item()
-                    eteg_stats = _compute_eteg(retrieval_aux, geo_aux, logit_scale_probe)
                 projection_stats = project_geo_gradients(m, g)
-                if should_probe and before_conflict is not None:
-                    after_conflict = _collect_text_conflict_stats(m, g)
-                    record = {
-                        "epoch": int(epoch),
-                        "step": int(step + 1),
-                        "gci_before": float(before_conflict["gci"]),
-                        "gci_after": float(after_conflict["gci"]),
-                        "neg_block_ratio_before": float(before_conflict["neg_block_ratio"]),
-                        "neg_block_ratio_after": float(after_conflict["neg_block_ratio"]),
-                        "block_cos_before": [
-                            None if v != v else float(v) for v in before_conflict["block_means"]
-                        ],
-                        "block_cos_after": [
-                            None if v != v else float(v) for v in after_conflict["block_means"]
-                        ],
-                        "retrieval_entropy": None if eteg_stats is None else eteg_stats["retrieval_entropy"],
-                        "geo_entropy": None if eteg_stats is None else eteg_stats["geo_entropy"],
-                        "eteg": None if eteg_stats is None else eteg_stats["eteg"],
-                    }
-                    _append_conflict_probe_record(conflict_probe_state, record)
-                    if loss_stats is None:
-                        loss_stats = {}
-                    loss_stats["gci_before"] = float(before_conflict["gci"])
-                    loss_stats["gci_after"] = float(after_conflict["gci"])
-                    loss_stats["neg_block_before"] = float(before_conflict["neg_block_ratio"])
-                    loss_stats["neg_block_after"] = float(after_conflict["neg_block_ratio"])
-                    if eteg_stats is not None:
-                        if eteg_stats["retrieval_entropy"] is not None:
-                            loss_stats["retrieval_entropy"] = float(eteg_stats["retrieval_entropy"])
-                        if eteg_stats["geo_entropy"] is not None:
-                            loss_stats["geo_entropy"] = float(eteg_stats["geo_entropy"])
-                        if eteg_stats["eteg"] is not None:
-                            loss_stats["eteg"] = float(eteg_stats["eteg"])
                 if loss_stats is None:
                     loss_stats = {}
                 loss_stats.update(projection_stats)
@@ -1420,6 +1603,54 @@ def train(
             optimizer.zero_grad(set_to_none=True)
             if geo_optimizer is not None:
                 geo_optimizer.zero_grad(set_to_none=True)
+
+            conflict_probe_every = int(getattr(args, "conflict_probe_every", 0))
+            conflict_probe_start = int(getattr(args, "conflict_probe_start", 0))
+            conflict_probe_end = int(getattr(args, "conflict_probe_end", 0))
+            probe_enabled = bool(getattr(args, "conflict_probe", False))
+            should_probe = (
+                probe_enabled
+                and conflict_probe_every > 0
+                and (step + 1) >= max(conflict_probe_start, 1)
+                and (conflict_probe_end <= 0 or (step + 1) <= conflict_probe_end)
+                and (((step + 1) - max(conflict_probe_start, 1)) % conflict_probe_every == 0)
+            )
+            if should_probe and isinstance(batch, dict):
+                probe_metrics = _run_unix_conflict_probe(
+                    m,
+                    i2t,
+                    images,
+                    instructions,
+                    modified_captions,
+                    src_captions,
+                    reverse_instructions,
+                    loss_ce,
+                    args,
+                    step + 1,
+                )
+                if probe_metrics is not None:
+                    if is_master(args) and conflict_probe_state is not None:
+                        record = {
+                            "epoch": int(epoch),
+                            "step": int(step + 1),
+                            "s_base": probe_metrics["s_base"],
+                            "s_cross_before": probe_metrics["s_cross_before"],
+                            "s_cross_after": probe_metrics["s_cross_after"],
+                            "gc_before": probe_metrics["gc_before"],
+                            "gc_after": probe_metrics["gc_after"],
+                            "ret_vectors": probe_metrics["ret_vectors"],
+                            "edit_vectors": probe_metrics["edit_vectors"],
+                            "edit_proj_vectors": probe_metrics["edit_proj_vectors"],
+                            "base_a_vectors": probe_metrics["base_a_vectors"],
+                            "base_b_vectors": probe_metrics["base_b_vectors"],
+                        }
+                        _append_conflict_probe_record(conflict_probe_state, record)
+                    if loss_stats is None:
+                        loss_stats = {}
+                    if probe_metrics.get("gc_before_mean") is not None:
+                        loss_stats["gc_before_mean"] = float(probe_metrics["gc_before_mean"])
+                    if probe_metrics.get("gc_after_mean") is not None:
+                        loss_stats["gc_after_mean"] = float(probe_metrics["gc_after_mean"])
 
             batch_time = time.time() - end
             end = time.time()
@@ -1476,12 +1707,10 @@ def train(
                         log_msg += f"\tz_fwd_rev_cos: {loss_stats['z_fwd_rev_cos']:.4f}"
                     if "geo_conflict_ratio" in loss_stats:
                         log_msg += f"\tgeo_conflict: {loss_stats['geo_conflict_ratio']:.2%}"
-                    if "gci_before" in loss_stats:
-                        log_msg += f"\tgci_before: {loss_stats['gci_before']:.4f}"
-                    if "gci_after" in loss_stats:
-                        log_msg += f"\tgci_after: {loss_stats['gci_after']:.4f}"
-                    if "eteg" in loss_stats:
-                        log_msg += f"\teteg: {loss_stats['eteg']:.4f}"
+                    if "gc_before_mean" in loss_stats:
+                        log_msg += f"\tgc_before: {loss_stats['gc_before_mean']:.4f}"
+                    if "gc_after_mean" in loss_stats:
+                        log_msg += f"\tgc_after: {loss_stats['gc_after_mean']:.4f}"
                     if "geo_valid_ratio" in loss_stats:
                         log_msg += f"\tgeo_valid: {loss_stats['geo_valid_ratio']:.2%}"
                     if "geo_missing_src_ratio" in loss_stats:
