@@ -34,6 +34,13 @@ import copy
 import types
 
 
+def _safe_torch_load(path, map_location=None, weights_only=False):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=weights_only, mmap=True)
+    except TypeError:
+        return torch.load(path, map_location=map_location, weights_only=weights_only)
+
+
 # -------------------
 # LoRA (minimal, local)
 # -------------------
@@ -315,7 +322,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             logging.info(f"🔄 Loading pic2word pretrained model from: {args.pic2word_pretrained}")
             logging.info("=" * 80)
         
-        checkpoint = torch.load(args.pic2word_pretrained, map_location='cpu', weights_only=False)
+        checkpoint = _safe_torch_load(args.pic2word_pretrained, map_location='cpu', weights_only=False)
         
         # Debug: Print checkpoint keys
         if is_master(args):
@@ -397,7 +404,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             logging.info("🔄 Loading img2text weights from pic2word checkpoint...")
             logging.info("=" * 80)
         
-        checkpoint = torch.load(args.pic2word_pretrained, map_location='cpu', weights_only=False)
+        checkpoint = _safe_torch_load(args.pic2word_pretrained, map_location='cpu', weights_only=False)
         
         # Try finding img2text weights
         sd_i2t = None
@@ -715,7 +722,11 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     if args.resume is not None:
         if os.path.isfile(args.resume):
             loc = None if args.gpu is None else f"cuda:{args.gpu}"
-            checkpoint = torch.load(args.resume, map_location=loc, weights_only=False) if loc else torch.load(args.resume, weights_only=False)
+            checkpoint = (
+                _safe_torch_load(args.resume, map_location=loc, weights_only=False)
+                if loc
+                else _safe_torch_load(args.resume, weights_only=False)
+            )
             start_epoch = checkpoint["epoch"]
             sd = checkpoint["state_dict"]
             sd_img2text = checkpoint["state_dict_img2text"]

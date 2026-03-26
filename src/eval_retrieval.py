@@ -43,6 +43,14 @@ from params import parse_args, get_project_root
 from logger import setup_primary_logging, setup_worker_logging
 from utils import is_master, convert_models_to_fp32, TargetPad
 
+
+def _safe_torch_load(path, map_location=None, weights_only=False):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=weights_only, mmap=True)
+    except TypeError:
+        return torch.load(path, map_location=map_location, weights_only=weights_only)
+
+
 # -------------------
 # LoRA (minimal, local) - 与当前 main.py 保持一致
 # -------------------
@@ -153,11 +161,11 @@ def load_model(args):
     assert args.resume is not None
     if os.path.isfile(args.resume):
         if args.gpu is None:
-            checkpoint = torch.load(args.resume)
+            checkpoint = _safe_torch_load(args.resume)
         else:
             # Map model to be loaded to specified single gpu.
             loc = "cuda:{}".format(args.gpu)
-            checkpoint = torch.load(args.resume, map_location=loc, weights_only=False)
+            checkpoint = _safe_torch_load(args.resume, map_location=loc, weights_only=False)
             print("Checkpoint top-level keys:", checkpoint.keys())
             for k in checkpoint.keys():
                 if "state_dict" in k:
