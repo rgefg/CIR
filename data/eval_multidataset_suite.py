@@ -112,7 +112,7 @@ def eval_fashion_composed(model, img2text, preprocess, gpu, batch_size, workers)
             for target_images, target_paths in tqdm(target_loader, desc=f"FashionIQ-{cloth}-gallery", leave=False):
                 target_images = target_images.cuda(gpu, non_blocking=True)
                 image_features = normalize(m.encode_image(target_images))
-                all_image_features.append(image_features)
+                all_image_features.append(image_features.cpu())
                 all_target_paths.extend(target_paths)
 
             for batch in tqdm(source_loader, desc=f"FashionIQ-{cloth}-query", leave=False):
@@ -128,7 +128,7 @@ def eval_fashion_composed(model, img2text, preprocess, gpu, batch_size, workers)
                     repeat=False,
                 )
                 composed_feature = normalize(composed_feature)
-                all_composed_features.append(composed_feature)
+                all_composed_features.append(composed_feature.cpu())
                 all_answer_paths.extend(answer_paths)
 
         metrics = get_metrics_fashion(
@@ -178,10 +178,10 @@ def eval_circo_val(model, img2text, preprocess, gpu, batch_size, workers):
         for images, paths in tqdm(gallery_loader, desc="CIRCO-gallery", leave=False):
             images = images.cuda(gpu, non_blocking=True)
             image_features = normalize(m.encode_image(images))
-            gallery_features.append(image_features)
+            gallery_features.append(image_features.cpu())
             for p in paths:
                 gallery_img_ids.append(int(os.path.basename(p).split(".")[0]))
-    gallery_features = torch.cat(gallery_features, dim=0)
+    gallery_features = torch.cat(gallery_features, dim=0).cuda(gpu, non_blocking=True)
     gallery_img_ids = np.array(gallery_img_ids)
 
     predictions_dict = {}
