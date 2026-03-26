@@ -696,7 +696,7 @@ def _normalized_lora_name(name):
     return name
 
 
-_TEXT_BLOCK_RE = re.compile(r"(?:^|\\.)transformer\\.resblocks\\.(\\d+)\\.")
+_TEXT_BLOCK_RE = re.compile(r"(?:^|\.)transformer\.resblocks\.(\d+)\.")
 
 
 def _extract_text_block_index(name):
