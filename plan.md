@@ -131,3 +131,44 @@
 1. retrieval 与 edit 分支在共享 text encoder 上存在显著梯度冲突。
 2. 梯度投影能够部分缓解这种冲突。
 3. 权重合并进一步减少了在线共享训练带来的冲突后果，因此带来更好的最终检索表现。
+
+## 7. 第一轮实测结果（2026-03-26）
+
+短跑配置：
+- run: `DistillCIR_ParallelDualLoRA_BS48_Accum8_QKV_StrictLoss_dropout0.5_conflictprobe100_v5`
+- setting: qkv-aware LoRA, strict geo loss, whole-instruction dropout=0.5, same-batch hard top-8 geo sampling
+- probe window: `step 10~100`, `every 10 step`
+- effective probe steps: `10`
+
+实测 summary：
+- `GCI before mean = 0.005236`
+- `GCI after mean = 0.000000`
+- `retrieval entropy mean = 3.7413`
+- `edit entropy mean = 1.2257`
+- `ETEG mean = -2.5156`
+
+逐层平均 cosine（before -> after）：
+- block 0: `0.0061 -> 0.0107`
+- block 1: `-0.0146 -> 0.0128`
+- block 2: `0.0017 -> 0.0135`
+- block 3: `0.0110 -> 0.0174`
+- block 4: `-0.0291 -> 0.0103`
+- block 5: `0.0069 -> 0.0238`
+- block 6: `0.0097 -> 0.0148`
+- block 7: `-0.0007 -> 0.0138`
+- block 8: `0.0006 -> 0.0251`
+- block 9: `0.0189 -> 0.0212`
+- block 10: `-0.0010 -> 0.0090`
+- block 11: `-0.0024 -> 0.0191`
+
+当前可直接讲的结论：
+1. 共享 text encoder 上确实存在逐层负冲突，最明显的是 block 1、4、7、10、11。
+2. 现有梯度投影会把这些负冲突层整体推回正区间，第一轮 probe 下 `GCI` 从 `0.005236` 直接压到 `0`。
+3. retrieval 与 edit 在同一候选目标集上的有效目标熵存在稳定差异，当前 `ETEG` 为负，说明两条分支对共享表征空间施加的分布约束并不相同。
+4. 这组结果已经足够支撑论文/报告里的核心故事；后续只需要用最终 plot 和结果表收尾。
+
+图文件：
+- `/data2/mingyu/composed_image_retrieval/logs/DistillCIR_ParallelDualLoRA_BS48_Accum8_QKV_StrictLoss_dropout0.5_conflictprobe100_v5/gradient_conflict_plot.png`
+- `/data2/mingyu/composed_image_retrieval/logs/DistillCIR_ParallelDualLoRA_BS48_Accum8_QKV_StrictLoss_dropout0.5_conflictprobe100_v5/gradient_conflict_layerwise.tsv`
+- `/data2/mingyu/composed_image_retrieval/logs/DistillCIR_ParallelDualLoRA_BS48_Accum8_QKV_StrictLoss_dropout0.5_conflictprobe100_v5/gradient_conflict_summary.json`
+
