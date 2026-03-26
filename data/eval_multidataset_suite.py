@@ -20,7 +20,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from eval_retrieval import load_model  # noqa: E402
-from eval_utils import compute_metrics, get_metrics_fashion  # noqa: E402
+from eval_utils import get_metrics_fashion  # noqa: E402
 from data import CIRCODataset, CustomFolder, FashionIQ, GeneCISDataset  # noqa: E402
 from third_party.open_clip.clip import tokenize  # noqa: E402
 
@@ -141,6 +141,53 @@ def eval_fashion_composed(model, img2text, preprocess, gpu, batch_size, workers)
     return out
 
 
+def compute_circo_metrics_local(query_dataset, predictions_dict, ranks):
+    semantic_aspects_list = [
+        "cardinality",
+        "addition",
+        "negation",
+        "direct_addressing",
+        "compare_change",
+        "comparative_statement",
+        "statement_with_conjunction",
+        "spatial_relations_background",
+        "viewpoint",
+    ]
+
+    aps_atk = {rank: [] for rank in ranks}
+    recalls_atk = {rank: [] for rank in ranks}
+    semantic_aps_at10 = {aspect: [] for aspect in semantic_aspects_list}
+
+    for query_id, predictions in predictions_dict.items():
+        target = query_dataset.get_target_img_ids(int(query_id))
+        semantic_aspects = query_dataset.get_semantic_aspects(int(query_id))
+        gt_img_ids = target["gt_img_ids"]
+        target_img_id = target["target_img_id"]
+
+        if len(set(predictions)) != len(predictions):
+            raise ValueError(f"Query {query_id} has duplicate predictions")
+
+        predictions = np.array(predictions, dtype=int)
+        ap_labels = np.isin(predictions, gt_img_ids)
+        precisions = np.cumsum(ap_labels, axis=0) * ap_labels
+        precisions = precisions / np.arange(1, ap_labels.shape[0] + 1)
+
+        for rank in ranks:
+            aps_atk[rank].append(float(np.sum(precisions[:rank]) / min(len(gt_img_ids), rank)))
+
+        recall_labels = predictions == target_img_id
+        for rank in ranks:
+            recalls_atk[rank].append(float(np.sum(recall_labels[:rank])))
+
+        for aspect in semantic_aspects:
+            semantic_aps_at10.setdefault(aspect, []).append(float(np.sum(precisions[:10]) / min(len(gt_img_ids), 10)))
+
+    map_atk = {rank: float(np.mean(aps_atk[rank])) for rank in ranks}
+    recall_atk = {rank: float(np.mean(recalls_atk[rank])) for rank in ranks}
+    semantic_map_at10 = {aspect: float(np.mean(semantic_aps_at10.get(aspect, [0.0]))) for aspect in semantic_aspects_list}
+    return map_atk, recall_atk, semantic_map_at10
+
+
 def eval_circo_val(model, img2text, preprocess, gpu, batch_size, workers):
     circo_root = REPO_ROOT / "data" / "CIRCO"
     gallery_path = circo_root / "COCO2017_unlabeled" / "unlabeled2017"
@@ -208,8 +255,8 @@ def eval_circo_val(model, img2text, preprocess, gpu, batch_size, workers):
                 q_id_int = int(q_id.item()) if isinstance(q_id, torch.Tensor) else int(q_id)
                 predictions_dict[q_id_int] = gallery_img_ids[topk_indices[i]].tolist()
 
-    map_atk, recall_atk, semantic_map_at10 = compute_metrics(
-        circo_root,
+    map_atk, recall_atk, semantic_map_at10 = compute_circo_metrics_local(
+        query_dataset,
         predictions_dict,
         [5, 10, 25, 50],
     )
