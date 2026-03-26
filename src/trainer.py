@@ -18,7 +18,7 @@ from pathlib import Path
 
 from torch.cuda.amp import autocast
 from third_party.open_clip.clip import tokenize
-from eval_utils import evaluate_cirr
+from eval_utils import evaluate_cirr, evaluate_fashion, evaluate_genecis
 from utils import is_master, use_ema_weights
 
 
@@ -1246,6 +1246,35 @@ def _geo_rng_context(branch_rng_state, enabled):
             torch.cuda.set_rng_state(state, device)
 
 
+def _run_periodic_multidataset_eval(model, img2text, args, data):
+    results = {"fashioniq": {}, "genecis": {}}
+
+    fashion_eval_loaders = data.get("fashion_eval_loaders", {})
+    for cloth, loaders in fashion_eval_loaders.items():
+        metrics = evaluate_fashion(
+            model,
+            img2text,
+            args,
+            loaders["query"],
+            loaders["target"],
+        )
+        results["fashioniq"][cloth] = metrics or {}
+
+    genecis_eval_loaders = data.get("genecis_eval_loaders", {})
+    original_genecis_task = getattr(args, "genecis_task", None)
+    try:
+        for task, loader in genecis_eval_loaders.items():
+            args.genecis_task = task
+            metrics = evaluate_genecis(model, img2text, args, loader)
+            results["genecis"][task] = {
+                f"R@{rank}": float(value) for rank, value in (metrics or {}).items()
+            }
+    finally:
+        args.genecis_task = original_genecis_task
+
+    return results
+
+
 def train(
     model,
     img2text,
@@ -1821,6 +1850,83 @@ def train(
                 img2text.train()
                 if geo_text_model is not None:
                     geo_text_model.train()
+
+                if args.distributed and dist.is_initialized():
+                    dist.barrier()
+
+            multidataset_eval_every = int(getattr(args, "multidataset_eval_every", 0))
+            multidataset_eval_enabled = (
+                multidataset_eval_every > 0
+                and ("fashion_eval_loaders" in data)
+                and ("genecis_eval_loaders" in data)
+            )
+            if multidataset_eval_enabled and (global_step % multidataset_eval_every == 0):
+                if args.distributed and dist.is_initialized():
+                    dist.barrier()
+
+                if is_master(args):
+                    eval_start = time.time()
+                    with (use_ema_weights(ema_pairs) if ema_eval_enabled else nullcontext()):
+                        multidataset_metrics = _run_periodic_multidataset_eval(model, img2text, args, data)
+                    eval_time = time.time() - eval_start
+
+                    summary_parts = []
+                    for cloth in ["dress", "shirt", "toptee"]:
+                        composed_metrics = (
+                            multidataset_metrics.get("fashioniq", {})
+                            .get(cloth, {})
+                            .get("composed", {})
+                        )
+                        if "R@10" in composed_metrics:
+                            summary_parts.append(
+                                f"fashion/{cloth}/composed/R@10={float(composed_metrics['R@10']):.2f}"
+                            )
+                    for task in ["focus_attribute", "change_attribute", "focus_object", "change_object"]:
+                        genecis_metrics = multidataset_metrics.get("genecis", {}).get(task, {})
+                        if "R@1" in genecis_metrics:
+                            summary_parts.append(
+                                f"genecis/{task}/R@1={float(genecis_metrics['R@1']):.2f}"
+                            )
+                    summary = ", ".join(summary_parts) if summary_parts else "no_metrics"
+                    logging.info(
+                        f"[MULTIDATASET-EVAL] epoch={epoch} step={global_step} time={eval_time:.2f}s {summary}"
+                    )
+
+                    for cloth, feat_metrics in multidataset_metrics.get("fashioniq", {}).items():
+                        for feat_name, metric_dict in feat_metrics.items():
+                            for metric_name, metric_val in metric_dict.items():
+                                tag = f"multieval/fashioniq/{cloth}/{feat_name}/{metric_name}"
+                                if tb_writer is not None:
+                                    tb_writer.add_scalar(tag, float(metric_val), global_step)
+                                if args.wandb:
+                                    wandb.log({tag: float(metric_val), "step": global_step})
+
+                    for task, metric_dict in multidataset_metrics.get("genecis", {}).items():
+                        for metric_name, metric_val in metric_dict.items():
+                            tag = f"multieval/genecis/{task}/{metric_name}"
+                            if tb_writer is not None:
+                                tb_writer.add_scalar(tag, float(metric_val), global_step)
+                            if args.wandb:
+                                wandb.log({tag: float(metric_val), "step": global_step})
+
+                    log_file = getattr(args, "multidataset_eval_log_path", None)
+                    if log_file:
+                        record = {
+                            "epoch": int(epoch),
+                            "step": int(global_step),
+                            "eval_time_sec": float(eval_time),
+                            "metrics": multidataset_metrics,
+                            "used_ema": bool(ema_eval_enabled),
+                        }
+                        with open(log_file, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+                model.train()
+                img2text.train()
+                if geo_text_model is not None:
+                    geo_text_model.train()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
                 if args.distributed and dist.is_initialized():
                     dist.barrier()

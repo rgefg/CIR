@@ -531,12 +531,14 @@ def evaluate_fashion(model, img2text, args, source_loader, target_loader):
                  'text': torch.cat(all_caption_features),
                  'mixture': torch.cat(all_mixture_features)}
         
+        metrics_by_feature = {}
         for key, value in feats.items():
             metrics = metric_func(ref_features=value)
+            metrics_by_feature[key] = {metric_name: float(metric_val) for metric_name, metric_val in metrics.items()}
             logging.info(
             f"Eval {key} Feature"
             + "\t".join([f"{k}: {v:.4f}" for k, v in metrics.items()]))
-    return metrics
+    return metrics_by_feature
 
 
 def get_metrics_coco(image_features, ref_features, logit_scale):

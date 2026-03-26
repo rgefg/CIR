@@ -279,6 +279,24 @@ def parse_args():
         help="Run CIRR validation evaluation every N optimizer updates during training. Set 0 to disable.",
     )
     parser.add_argument(
+        "--multidataset-eval-every",
+        type=int,
+        default=0,
+        help="Run periodic FashionIQ + GeneCIS evaluation every N optimizer updates during training. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--multidataset-eval-batch-size",
+        type=int,
+        default=32,
+        help="Batch size used for periodic FashionIQ + GeneCIS evaluation during training.",
+    )
+    parser.add_argument(
+        "--multidataset-eval-workers",
+        type=int,
+        default=2,
+        help="DataLoader workers used for periodic FashionIQ + GeneCIS evaluation during training.",
+    )
+    parser.add_argument(
         "--model",
         choices=["RN50", "RN101", "RN50x4",  "RN50x64", "RN50x16", "ViT-B/16", "ViT-B/32", "ViT-L/14", "ViT-H-14", 
                  "RN50_flat", "RN50_t1", "RN50_t2", "RN50_t3", "RN50_t4", "RN50_t5", "RN50_t6",

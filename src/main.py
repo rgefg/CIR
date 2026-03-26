@@ -23,7 +23,7 @@ from third_party.open_clip.scheduler import cosine_lr
 from model.clip import _transform, load
 from model.model import convert_weights, CLIP, IM2TEXT, LoRAMultiheadAttention, LoRALinear as ModelLoRALinear
 from trainer import train
-from data import get_data, CIRR
+from data import get_data, CIRR, FashionIQ, GeneCISDataset
 from params import parse_args, get_project_root
 from logger import setup_primary_logging, setup_worker_logging
 from utils import is_master, convert_models_to_fp32, ModuleParamEMA, use_ema_weights
@@ -589,6 +589,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     data = get_data(args, (preprocess_train, preprocess_val))
     args.actual_samples_per_microbatch = args.batch_size * args.world_size
     args.cirr_val_eval_log_path = os.path.join(args.logs, args.name, "cirr_val_eval.log")
+    args.multidataset_eval_log_path = os.path.join(args.logs, args.name, "multidataset_eval.log")
     cirr_eval_every = int(getattr(args, "cirr_val_eval_every", 0))
     if cirr_eval_every > 0:
         try:
@@ -621,6 +622,87 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             if is_master(args):
                 logging.warning(f"⚠️ Failed to initialize periodic CIRR-val eval; disabling it. Error: {exc}")
             args.cirr_val_eval_every = 0
+
+    multidataset_eval_every = int(getattr(args, "multidataset_eval_every", 0))
+    if multidataset_eval_every > 0:
+        try:
+            root_project = os.path.join(get_project_root(), "data")
+            eval_batch_size = int(getattr(args, "multidataset_eval_batch_size", args.batch_size))
+            eval_workers = int(getattr(args, "multidataset_eval_workers", args.workers))
+
+            fashion_eval_loaders = {}
+            for cloth in ["dress", "shirt", "toptee"]:
+                source_dataset = FashionIQ(
+                    cloth=cloth,
+                    transforms=preprocess_val,
+                    root=root_project,
+                    is_return_target_path=True,
+                )
+                target_dataset = FashionIQ(
+                    cloth=cloth,
+                    transforms=preprocess_val,
+                    root=root_project,
+                    mode="imgs",
+                )
+                fashion_eval_loaders[cloth] = {
+                    "query": DataLoader(
+                        source_dataset,
+                        batch_size=eval_batch_size,
+                        shuffle=False,
+                        num_workers=eval_workers,
+                        pin_memory=True,
+                        drop_last=False,
+                    ),
+                    "target": DataLoader(
+                        target_dataset,
+                        batch_size=eval_batch_size,
+                        shuffle=False,
+                        num_workers=eval_workers,
+                        pin_memory=True,
+                        drop_last=False,
+                    ),
+                }
+
+            genecis_eval_loaders = {}
+            genecis_vg_root = os.path.join(root_project, "genecis", "VG_100K")
+            genecis_coco_root = os.path.join(root_project, "coco", "val2017")
+            genecis_json_root = "/data2/mingyu/genecis/genecis"
+            for task in ["focus_attribute", "change_attribute", "focus_object", "change_object"]:
+                img_root = genecis_coco_root if "object" in task else genecis_vg_root
+                dataset = GeneCISDataset(
+                    data_root=img_root,
+                    json_root=genecis_json_root,
+                    task=task,
+                    transforms=preprocess_val,
+                    tokenizer=None,
+                )
+                genecis_eval_loaders[task] = DataLoader(
+                    dataset,
+                    batch_size=eval_batch_size,
+                    shuffle=False,
+                    num_workers=eval_workers,
+                    pin_memory=True,
+                    drop_last=False,
+                )
+
+            data["fashion_eval_loaders"] = fashion_eval_loaders
+            data["genecis_eval_loaders"] = genecis_eval_loaders
+            if is_master(args):
+                logging.info(
+                    "✅ Periodic FashionIQ/GeneCIS eval enabled: "
+                    f"every {multidataset_eval_every} steps, "
+                    f"fashion_categories={list(fashion_eval_loaders.keys())}, "
+                    f"genecis_tasks={list(genecis_eval_loaders.keys())}, "
+                    f"batch_size={eval_batch_size}, workers={eval_workers}, "
+                    f"log_file={args.multidataset_eval_log_path}"
+                )
+        except Exception as exc:
+            if is_master(args):
+                logging.warning(
+                    "⚠️ Failed to initialize periodic FashionIQ/GeneCIS eval; disabling it. "
+                    f"Error: {exc}"
+                )
+            args.multidataset_eval_every = 0
 
     # ---- Optimizer ----
     def exclude(n):
