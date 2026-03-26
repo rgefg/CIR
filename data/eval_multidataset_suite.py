@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--genecis-batch-size", type=int, default=32)
     parser.add_argument("--name", type=str, default="multidataset_eval")
     parser.add_argument("--logs", type=str, default=str(REPO_ROOT / "logs"))
+    parser.add_argument("--datasets", type=str, default="fashioniq,circo,genecis")
     return parser.parse_args()
 
 
@@ -336,33 +337,35 @@ def main():
     model.eval()
     img2text.eval()
 
-    result = {
-        "resume": cli_args.resume,
-        "fashioniq": eval_fashion_composed(
+    selected = {x.strip().lower() for x in cli_args.datasets.split(",") if x.strip()}
+    result = {"resume": cli_args.resume}
+    if "fashioniq" in selected:
+        result["fashioniq"] = eval_fashion_composed(
             model,
             img2text,
             preprocess,
             cli_args.gpu,
             cli_args.batch_size,
             cli_args.workers,
-        ),
-        "circo_val": eval_circo_val(
+        )
+    if "circo" in selected:
+        result["circo_val"] = eval_circo_val(
             model,
             img2text,
             preprocess,
             cli_args.gpu,
             cli_args.batch_size,
             cli_args.workers,
-        ),
-        "genecis": eval_genecis(
+        )
+    if "genecis" in selected:
+        result["genecis"] = eval_genecis(
             model,
             img2text,
             preprocess,
             cli_args.gpu,
             cli_args.genecis_batch_size,
             cli_args.workers,
-        ),
-    }
+        )
 
     output_path = Path(cli_args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
