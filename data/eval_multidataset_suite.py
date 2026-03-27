@@ -20,7 +20,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from eval_retrieval import load_model  # noqa: E402
-from eval_utils import get_metrics_fashion  # noqa: E402
+from eval_utils import build_bidirectional_fashion_prompts, get_metrics_fashion  # noqa: E402
 from data import CIRCODataset, CustomFolder, FashionIQ, GeneCISDataset  # noqa: E402
 from third_party.open_clip.clip import tokenize  # noqa: E402
 
@@ -117,18 +117,28 @@ def eval_fashion_composed(model, img2text, preprocess, gpu, batch_size, workers)
                 all_target_paths.extend(target_paths)
 
             for batch in tqdm(source_loader, desc=f"FashionIQ-{cloth}-query", leave=False):
-                ref_images, _, target_caption, _, answer_paths, _, _ = batch
+                ref_images, _, _, _, answer_paths, _, captions = batch
                 ref_images = ref_images.cuda(gpu, non_blocking=True)
-                target_caption = target_caption.cuda(gpu, non_blocking=True)
+                input_captions, input_captions_reversed = build_bidirectional_fashion_prompts(captions)
+                tokenized_input_captions = tokenize(input_captions).cuda(gpu, non_blocking=True)
+                tokenized_input_captions_reversed = tokenize(input_captions_reversed).cuda(gpu, non_blocking=True)
                 query_image_features = m.encode_image(ref_images)
                 query_image_tokens = img2text(query_image_features)
-                composed_feature = m.encode_text_img_retrieval(
-                    target_caption,
+                composed_feature_forward = m.encode_text_img_retrieval(
+                    tokenized_input_captions,
                     query_image_tokens,
                     split_ind=id_split,
                     repeat=False,
                 )
-                composed_feature = normalize(composed_feature)
+                composed_feature_reversed = m.encode_text_img_retrieval(
+                    tokenized_input_captions_reversed,
+                    query_image_tokens,
+                    split_ind=id_split,
+                    repeat=False,
+                )
+                composed_feature = normalize(
+                    (normalize(composed_feature_forward) + normalize(composed_feature_reversed)) / 2
+                )
                 all_composed_features.append(composed_feature.cpu())
                 all_answer_paths.extend(answer_paths)
 

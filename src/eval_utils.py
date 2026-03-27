@@ -33,6 +33,25 @@ import pickle
 
 from utils import is_master
 
+
+def build_bidirectional_fashion_prompts(relative_captions, prompt_template="a photo of * and {first} and {second}"):
+    arr = np.array(relative_captions, dtype=object)
+    if arr.ndim == 2 and arr.shape[0] == 2:
+        caption_pairs = arr.T.tolist()
+    else:
+        caption_pairs = arr.tolist()
+
+    prompts = []
+    prompts_reversed = []
+    for pair in caption_pairs:
+        if len(pair) != 2:
+            raise ValueError(f"Expected caption pair of length 2, got: {pair}")
+        cap1 = str(pair[0]).strip(".?, ")
+        cap2 = str(pair[1]).strip(".?, ")
+        prompts.append(prompt_template.format(first=cap1, second=cap2))
+        prompts_reversed.append(prompt_template.format(first=cap2, second=cap1))
+    return prompts, prompts_reversed
+
 def prepare_img(img_file, transform):
     return transform(Image.open(img_file))
 
@@ -507,21 +526,37 @@ def evaluate_fashion(model, img2text, args, source_loader, target_loader):
                 caption_only = caption_only.cuda(args.gpu, non_blocking=True)
             image_features = m.encode_image(target_images)
             query_image_features = m.encode_image(ref_images)
-            id_split = tokenize(["*"])[0][1]            
-            caption_features = m.encode_text(target_caption)                            
-            query_image_tokens = img2text(query_image_features)          
-            composed_feature = m.encode_text_img_retrieval(target_caption, query_image_tokens, split_ind=id_split, repeat=False)
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)            
-            caption_features = caption_features / caption_features.norm(dim=-1, keepdim=True)                       
-            query_image_features = query_image_features / query_image_features.norm(dim=-1, keepdim=True)   
+            id_split = tokenize(["*"])[0][1]
+            input_captions, input_captions_reversed = build_bidirectional_fashion_prompts(captions)
+            tokenized_input_captions = tokenize(input_captions).cuda(args.gpu, non_blocking=True)
+            tokenized_input_captions_reversed = tokenize(input_captions_reversed).cuda(args.gpu, non_blocking=True)
+
+            caption_features_forward = m.encode_text(tokenized_input_captions)
+            caption_features_reversed = m.encode_text(tokenized_input_captions_reversed)
+            caption_features = F.normalize(
+                (F.normalize(caption_features_forward, dim=-1) + F.normalize(caption_features_reversed, dim=-1)) / 2,
+                dim=-1,
+            )
+            query_image_tokens = img2text(query_image_features)
+            composed_feature_forward = m.encode_text_img_retrieval(
+                tokenized_input_captions, query_image_tokens, split_ind=id_split, repeat=False
+            )
+            composed_feature_reversed = m.encode_text_img_retrieval(
+                tokenized_input_captions_reversed, query_image_tokens, split_ind=id_split, repeat=False
+            )
+            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+            query_image_features = query_image_features / query_image_features.norm(dim=-1, keepdim=True)
             mixture_features = query_image_features + caption_features
             mixture_features = mixture_features / mixture_features.norm(dim=-1, keepdim=True)
-            composed_feature = composed_feature / composed_feature.norm(dim=-1, keepdim=True)
+            composed_feature = F.normalize(
+                (F.normalize(composed_feature_forward, dim=-1) + F.normalize(composed_feature_reversed, dim=-1)) / 2,
+                dim=-1,
+            )
 
             all_caption_features.append(caption_features)
             all_query_image_features.append(query_image_features)
-            all_composed_features.append(composed_feature)            
-            all_mixture_features.append(mixture_features)                         
+            all_composed_features.append(composed_feature)
+            all_mixture_features.append(mixture_features)
 
         metric_func = partial(get_metrics_fashion, 
                               image_features=torch.cat(all_image_features),

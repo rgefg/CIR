@@ -504,7 +504,7 @@ class FashionIQ(Dataset):
         if self.is_return_target_path:
             return ref_images, target_images, token_texts, token_texts, \
                 str(self.target_imgs[idx]), str(self.ref_imgs[idx]), \
-                    cap1
+                    (cap1, cap2)
         else:
             return ref_images, target_images, text_with_blank
 
