@@ -348,7 +348,7 @@ def main():
     img2text.eval()
 
     selected = {x.strip().lower() for x in cli_args.datasets.split(",") if x.strip()}
-    result = {"resume": cli_args.resume}
+    result = {}
     if "fashioniq" in selected:
         result["fashioniq"] = eval_fashion_composed(
             model,

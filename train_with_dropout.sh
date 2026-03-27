@@ -4,9 +4,9 @@ set -euo pipefail
 export PYTHONPATH="/data2/mingyu/composed_image_retrieval:/data2/mingyu/composed_image_retrieval/src:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-DIST_URL="${DIST_URL:-tcp://127.0.0.1:6150}"
+DIST_URL="${DIST_URL:-tcp://127.0.0.1:6151}"
 TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-6,7}}"
-RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1700_QKV_StrictLoss_dropout0.5_FashionGeneCIS}"
+RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1700_QKV_StrictLoss_NoDrop_StandMergeFashionGeneCIS}"
 EVAL_GPU="${EVAL_GPU:-1}"
 
 TRAIN_JSON="${TRAIN_JSON:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2_with_reverse.jsonl}"
@@ -22,7 +22,7 @@ TRAIN_WORKERS="${TRAIN_WORKERS:-2}"
 TRAIN_EPOCH_STEPS="${TRAIN_EPOCH_STEPS:-1700}"
 WARMUP_STEPS="${WARMUP_STEPS:-200}"
 SAVE_STEP_INTERVAL="${SAVE_STEP_INTERVAL:-200}"
-SAVE_STEP_START="${SAVE_STEP_START:-200}"
+SAVE_STEP_START="${SAVE_STEP_START:-800}"
 SAVE_STEP_END="${SAVE_STEP_END:-1600}"
 LOG_INTERVAL="${LOG_INTERVAL:-25}"
 CIRR_VAL_EVAL_EVERY="${CIRR_VAL_EVAL_EVERY:-0}"
@@ -75,7 +75,7 @@ GEO_DELTA_NORM_EPS="${GEO_DELTA_NORM_EPS:-1e-4}"
 GEO_DELTA_MIN_NORM="${GEO_DELTA_MIN_NORM:-1e-3}"
 GEO_SAMPLING_MODE="${GEO_SAMPLING_MODE:-hard}"
 GEO_TOPK="${GEO_TOPK:-8}"
-INSTRUCTION_DROPOUT_PROB="${INSTRUCTION_DROPOUT_PROB:-0.5}"
+INSTRUCTION_DROPOUT_PROB="${INSTRUCTION_DROPOUT_PROB:-0.0}"
 CONFLICT_PROBE="${CONFLICT_PROBE:-0}"
 CONFLICT_PROBE_EVERY="${CONFLICT_PROBE_EVERY:-25}"
 CONFLICT_PROBE_START="${CONFLICT_PROBE_START:-25}"
@@ -87,8 +87,14 @@ MERGE_RETRIEVAL_WEIGHT="${MERGE_RETRIEVAL_WEIGHT:-0.5}"
 MERGE_GEO_WEIGHT="${MERGE_GEO_WEIGHT:-0.5}"
 MERGE_DENSITY="${MERGE_DENSITY:-0.9}"
 ENABLE_PARALLEL_MERGE_EVAL="${ENABLE_PARALLEL_MERGE_EVAL:-0}"
-ENABLE_MULTIDATASET_WATCHER="${ENABLE_MULTIDATASET_WATCHER:-1}"
-MULTIDATASET_WATCH_KIND="${MULTIDATASET_WATCH_KIND:-ema}"
+
+ENABLE_MULTIDATASET_STANDALONE_WATCHER="${ENABLE_MULTIDATASET_STANDALONE_WATCHER:-1}"
+ENABLE_MULTIDATASET_MERGED_WATCHER="${ENABLE_MULTIDATASET_MERGED_WATCHER:-1}"
+MULTIDATASET_EVAL_START_STEP="${MULTIDATASET_EVAL_START_STEP:-800}"
+MULTIDATASET_DATASETS="${MULTIDATASET_DATASETS:-fashioniq,genecis}"
+MULTIDATASET_STANDALONE_KIND="${MULTIDATASET_STANDALONE_KIND:-raw}"
+MULTIDATASET_MERGED_BASE_KIND="${MULTIDATASET_MERGED_BASE_KIND:-raw}"
+MULTIDATASET_MERGED_GEO_KIND="${MULTIDATASET_MERGED_GEO_KIND:-ema}"
 WATCHER_CPU_AFFINITY="${WATCHER_CPU_AFFINITY:-48-63}"
 WATCHER_NICE="${WATCHER_NICE:-15}"
 WATCHER_CPU_THREADS="${WATCHER_CPU_THREADS:-1}"
@@ -96,20 +102,21 @@ WATCHER_EVAL_WORKERS="${WATCHER_EVAL_WORKERS:-1}"
 
 LOG_DIR="/data2/mingyu/composed_image_retrieval/logs/${RUN_NAME}"
 CKPT_DIR="${LOG_DIR}/checkpoints"
-STANDALONE_JSONL="${LOG_DIR}/cirr_val_eval.log"
-MERGED_JSONL="${LOG_DIR}/cirr_val_parallel_merged_eval.jsonl"
-SUMMARY_TSV="${LOG_DIR}/cirr_val_summary.tsv"
-MULTIDATASET_JSONL="${LOG_DIR}/multidataset_eval.jsonl"
-MULTIDATASET_WATCHER_LOG="${LOG_DIR}/multidataset_watcher.log"
+MULTIDATASET_STANDALONE_JSONL="${LOG_DIR}/multidataset_standalone.jsonl"
+MULTIDATASET_MERGED_JSONL="${LOG_DIR}/multidataset_merged.jsonl"
+MULTIDATASET_STANDALONE_LOG="${LOG_DIR}/multidataset_standalone_watcher.log"
+MULTIDATASET_MERGED_LOG="${LOG_DIR}/multidataset_merged_watcher.log"
 
 mkdir -p "${CKPT_DIR}"
 
-WATCHER_PID=""
+WATCHER_PIDS=()
 cleanup() {
-  if [[ -n "${WATCHER_PID}" ]] && kill -0 "${WATCHER_PID}" 2>/dev/null; then
-    kill "${WATCHER_PID}" 2>/dev/null || true
-    wait "${WATCHER_PID}" 2>/dev/null || true
-  fi
+  for pid in "${WATCHER_PIDS[@]:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
 }
 trap cleanup EXIT
 
@@ -124,8 +131,11 @@ echo "Train workers: ${TRAIN_WORKERS}"
 echo "Warmup steps: ${WARMUP_STEPS}"
 echo "WDS shuffle: samples=${WDS_SHUFFLE}, shards=${WDS_SHARDSHUFFLE}"
 echo "CIRR val every: ${CIRR_VAL_EVAL_EVERY}"
-echo "FashionIQ/GeneCIS eval every: ${MULTIDATASET_EVAL_EVERY} (batch=${MULTIDATASET_EVAL_BATCH_SIZE}, workers=${MULTIDATASET_EVAL_WORKERS})"
-echo "FashionIQ/GeneCIS watcher: enabled=${ENABLE_MULTIDATASET_WATCHER}, kind=${MULTIDATASET_WATCH_KIND}, eval_gpu=${EVAL_GPU}"
+echo "FashionIQ/GeneCIS in-process eval every: ${MULTIDATASET_EVAL_EVERY}"
+echo "FashionIQ/GeneCIS standalone watcher: enabled=${ENABLE_MULTIDATASET_STANDALONE_WATCHER}, kind=${MULTIDATASET_STANDALONE_KIND}, start_step=${MULTIDATASET_EVAL_START_STEP}"
+echo "FashionIQ/GeneCIS merged watcher: enabled=${ENABLE_MULTIDATASET_MERGED_WATCHER}, base=${MULTIDATASET_MERGED_BASE_KIND}, geo=${MULTIDATASET_MERGED_GEO_KIND}, start_step=${MULTIDATASET_EVAL_START_STEP}"
+echo "FashionIQ/GeneCIS datasets: ${MULTIDATASET_DATASETS}"
+echo "FashionIQ/GeneCIS batch/workers: batch=${MULTIDATASET_EVAL_BATCH_SIZE}, workers=${MULTIDATASET_EVAL_WORKERS}"
 echo "Seed: ${SEED}"
 echo "Retrieval optim: lr=${LR}, wd=${WD}, betas=(${BETA1}, ${BETA2}), eps=${EPS}"
 echo "Retrieval LoRA: r=${LORA_R}, alpha=${LORA_ALPHA}, dropout=${LORA_DROPOUT}"
@@ -147,47 +157,18 @@ echo "Instruction dropout prob: ${INSTRUCTION_DROPOUT_PROB}"
 echo "Conflict probe: enabled=${CONFLICT_PROBE}, every=${CONFLICT_PROBE_EVERY}, start=${CONFLICT_PROBE_START}, end=${CONFLICT_PROBE_END}"
 echo "Geo norm eps: embed=${GEO_EMBED_NORM_EPS}, delta=${GEO_DELTA_NORM_EPS}, min_delta=${GEO_DELTA_MIN_NORM}"
 echo "Watcher isolation: affinity=${WATCHER_CPU_AFFINITY}, nice=${WATCHER_NICE}, cpu_threads=${WATCHER_CPU_THREADS}, eval_workers=${WATCHER_EVAL_WORKERS}"
-
 echo "Step save interval: ${SAVE_STEP_INTERVAL}"
+echo "Step save start/end: ${SAVE_STEP_START} / ${SAVE_STEP_END}"
 echo "If OOM: lower TRAIN_BATCH_SIZE in this order: 56 -> 52 -> 48 -> 44, and keep effective contrastive batch reasonably large."
 
-if [[ "${ENABLE_PARALLEL_MERGE_EVAL}" == "1" && "${GEO_WEIGHT}" != "0" && "${GEO_WEIGHT}" != "0.0" ]]; then
-  python data/watch_cirr_parallel_merge_eval.py \
-    --checkpoint-dir "${CKPT_DIR}" \
-    --output-jsonl "${MERGED_JSONL}" \
-    --eval-gpu "${EVAL_GPU}" \
-    --batch-size 56 \
-    --workers "${WATCHER_EVAL_WORKERS}" \
-    --retrieval-weight "${MERGE_RETRIEVAL_WEIGHT}" \
-    --geo-weight "${MERGE_GEO_WEIGHT}" \
-    --density "${MERGE_DENSITY}" \
-    --lora-alpha 16 \
-    --lora-rank 64 \
-    --nice "${WATCHER_NICE}" \
-    --cpu-affinity "${WATCHER_CPU_AFFINITY}" \
-    --cpu-threads "${WATCHER_CPU_THREADS}" \
-    --poll-interval 30 \
-    --timeout 1800 \
-    --stop-on-final &
-  WATCHER_PID=$!
+if [[ "${ENABLE_MULTIDATASET_STANDALONE_WATCHER}" == "1" ]]; then
+  python data/watch_multidataset_eval.py     --mode standalone     --checkpoint-dir "${CKPT_DIR}"     --output-jsonl "${MULTIDATASET_STANDALONE_JSONL}"     --eval-gpu "${EVAL_GPU}"     --batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}"     --workers "${MULTIDATASET_EVAL_WORKERS}"     --genecis-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}"     --datasets "${MULTIDATASET_DATASETS}"     --checkpoint-kind "${MULTIDATASET_STANDALONE_KIND}"     --min-step "${MULTIDATASET_EVAL_START_STEP}"     --nice "${WATCHER_NICE}"     --cpu-affinity "${WATCHER_CPU_AFFINITY}"     --cpu-threads "${WATCHER_CPU_THREADS}"     --poll-interval 30     --timeout 7200     --stop-on-final > "${MULTIDATASET_STANDALONE_LOG}" 2>&1 &
+  WATCHER_PIDS+=("$!")
 fi
 
-if [[ "${ENABLE_MULTIDATASET_WATCHER}" == "1" ]]; then
-  python data/watch_multidataset_eval.py \
-    --checkpoint-dir "${CKPT_DIR}" \
-    --output-jsonl "${MULTIDATASET_JSONL}" \
-    --eval-gpu "${EVAL_GPU}" \
-    --batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}" \
-    --workers "${MULTIDATASET_EVAL_WORKERS}" \
-    --genecis-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}" \
-    --checkpoint-kind "${MULTIDATASET_WATCH_KIND}" \
-    --nice "${WATCHER_NICE}" \
-    --cpu-affinity "${WATCHER_CPU_AFFINITY}" \
-    --cpu-threads "${WATCHER_CPU_THREADS}" \
-    --poll-interval 30 \
-    --timeout 7200 \
-    --stop-on-final > "${MULTIDATASET_WATCHER_LOG}" 2>&1 &
-  WATCHER_PID=$!
+if [[ "${ENABLE_MULTIDATASET_MERGED_WATCHER}" == "1" && "${GEO_WEIGHT}" != "0" && "${GEO_WEIGHT}" != "0.0" ]]; then
+  python data/watch_multidataset_eval.py     --mode merged     --checkpoint-dir "${CKPT_DIR}"     --output-jsonl "${MULTIDATASET_MERGED_JSONL}"     --eval-gpu "${EVAL_GPU}"     --batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}"     --workers "${MULTIDATASET_EVAL_WORKERS}"     --genecis-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}"     --datasets "${MULTIDATASET_DATASETS}"     --base-kind "${MULTIDATASET_MERGED_BASE_KIND}"     --geo-kind "${MULTIDATASET_MERGED_GEO_KIND}"     --min-step "${MULTIDATASET_EVAL_START_STEP}"     --merge-weight-a "${MERGE_RETRIEVAL_WEIGHT}"     --merge-weight-b "${MERGE_GEO_WEIGHT}"     --merge-density "${MERGE_DENSITY}"     --merge-alpha-a 16     --merge-rank-a 64     --merge-alpha-b 16     --merge-rank-b 64     --nice "${WATCHER_NICE}"     --cpu-affinity "${WATCHER_CPU_AFFINITY}"     --cpu-threads "${WATCHER_CPU_THREADS}"     --poll-interval 30     --timeout 7200     --stop-on-final > "${MULTIDATASET_MERGED_LOG}" 2>&1 &
+  WATCHER_PIDS+=("$!")
 fi
 
 EXTRA_ARGS=()
@@ -218,87 +199,8 @@ if [[ "${CONFLICT_PROBE}" == "1" ]]; then
   )
 fi
 
-CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py \
-  --name "${RUN_NAME}" \
-  --dataset-type cc3m_cir_wds \
-  --cc3m-cir-jsonl "${TRAIN_JSON}" \
-  --train-data "dummy" \
-  --wds-shards "${WDS_SHARDS}" \
-  --wds-epoch-steps "${TRAIN_EPOCH_STEPS}" \
-  --wds-shuffle "${WDS_SHUFFLE}" \
-  --wds-shardshuffle "${WDS_SHARDSHUFFLE}" \
-  --model ViT-L/14 \
-  --pic2word-pretrained "${PIC2WORD_CKPT}" \
-  --batch-size "${TRAIN_BATCH_SIZE}" \
-  --accum-steps "${TRAIN_ACCUM_STEPS}" \
-  --epochs 1 \
-  --seed "${SEED}" \
-  --lr "${LR}" \
-  --beta1 "${BETA1}" \
-  --beta2 "${BETA2}" \
-  --eps "${EPS}" \
-  --wd "${WD}" \
-  --warmup "${WARMUP_STEPS}" \
-  --precision "${PRECISION}" \
-  --amp-init-scale "${AMP_INIT_SCALE}" \
-  --amp-growth-factor "${AMP_GROWTH_FACTOR}" \
-  --amp-backoff-factor "${AMP_BACKOFF_FACTOR}" \
-  --amp-growth-interval "${AMP_GROWTH_INTERVAL}" \
-  --retrieval-ema-decay "${RETRIEVAL_EMA_DECAY}" \
-  --workers "${TRAIN_WORKERS}" \
-  --lora-r "${LORA_R}" \
-  --lora-alpha "${LORA_ALPHA}" \
-  --lora-dropout "${LORA_DROPOUT}" \
-  --instruction-dropout-prob "${INSTRUCTION_DROPOUT_PROB}" \
-  --reset-logit-scale \
-  --logit-scale-clamp-min 9.0 \
-  --logit-scale-clamp-max 36.6 \
-  --logit-scale-freeze-percent 0.3 \
-  --save-frequency 1 \
-  --save-step-start "${SAVE_STEP_START}" \
-  --save-step-end "${SAVE_STEP_END}" \
-  --save-step-interval "${SAVE_STEP_INTERVAL}" \
-  --log-interval "${LOG_INTERVAL}" \
-  --cirr-val-eval-every "${CIRR_VAL_EVAL_EVERY}" \
-  --multidataset-eval-every "${MULTIDATASET_EVAL_EVERY}" \
-  --multidataset-eval-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}" \
-  --multidataset-eval-workers "${MULTIDATASET_EVAL_WORKERS}" \
-  --geo-weight "${GEO_WEIGHT}" \
-  --geo-seed "${GEO_SEED}" \
-  --geo-lr "${GEO_LR}" \
-  --geo-beta1 "${GEO_BETA1}" \
-  --geo-beta2 "${GEO_BETA2}" \
-  --geo-eps "${GEO_EPS}" \
-  --geo-wd "${GEO_WD}" \
-  --geo-warmup "${GEO_WARMUP_STEPS}" \
-  --geo-lora-r "${GEO_LORA_R}" \
-  --geo-lora-alpha "${GEO_LORA_ALPHA}" \
-  --geo-lora-dropout "${GEO_LORA_DROPOUT}" \
-  --geo-amp-init-scale "${GEO_AMP_INIT_SCALE}" \
-  --geo-amp-growth-factor "${GEO_AMP_GROWTH_FACTOR}" \
-  --geo-amp-backoff-factor "${GEO_AMP_BACKOFF_FACTOR}" \
-  --geo-amp-growth-interval "${GEO_AMP_GROWTH_INTERVAL}" \
-  --geo-ema-decay "${GEO_EMA_DECAY}" \
-  --geo-reverse-weight "${GEO_REVERSE_WEIGHT}" \
-  --geo-reverse-margin "${GEO_REVERSE_MARGIN}" \
-  --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}" \
-  --geo-sampling-mode "${GEO_SAMPLING_MODE}" \
-  --geo-topk "${GEO_TOPK}" \
-  --geo-embed-norm-eps "${GEO_EMBED_NORM_EPS}" \
-  --geo-delta-norm-eps "${GEO_DELTA_NORM_EPS}" \
-  --geo-delta-min-norm "${GEO_DELTA_MIN_NORM}" \
-  --dist-url "${DIST_URL}" \
-  "${EXTRA_ARGS[@]}"
+CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" python -u src/main.py   --name "${RUN_NAME}"   --dataset-type cc3m_cir_wds   --cc3m-cir-jsonl "${TRAIN_JSON}"   --train-data "dummy"   --wds-shards "${WDS_SHARDS}"   --wds-epoch-steps "${TRAIN_EPOCH_STEPS}"   --wds-shuffle "${WDS_SHUFFLE}"   --wds-shardshuffle "${WDS_SHARDSHUFFLE}"   --model ViT-L/14   --pic2word-pretrained "${PIC2WORD_CKPT}"   --batch-size "${TRAIN_BATCH_SIZE}"   --accum-steps "${TRAIN_ACCUM_STEPS}"   --epochs 1   --seed "${SEED}"   --lr "${LR}"   --beta1 "${BETA1}"   --beta2 "${BETA2}"   --eps "${EPS}"   --wd "${WD}"   --warmup "${WARMUP_STEPS}"   --precision "${PRECISION}"   --amp-init-scale "${AMP_INIT_SCALE}"   --amp-growth-factor "${AMP_GROWTH_FACTOR}"   --amp-backoff-factor "${AMP_BACKOFF_FACTOR}"   --amp-growth-interval "${AMP_GROWTH_INTERVAL}"   --retrieval-ema-decay "${RETRIEVAL_EMA_DECAY}"   --workers "${TRAIN_WORKERS}"   --lora-r "${LORA_R}"   --lora-alpha "${LORA_ALPHA}"   --lora-dropout "${LORA_DROPOUT}"   --instruction-dropout-prob "${INSTRUCTION_DROPOUT_PROB}"   --reset-logit-scale   --logit-scale-clamp-min 9.0   --logit-scale-clamp-max 36.6   --logit-scale-freeze-percent 0.3   --save-frequency 1   --save-step-start "${SAVE_STEP_START}"   --save-step-end "${SAVE_STEP_END}"   --save-step-interval "${SAVE_STEP_INTERVAL}"   --log-interval "${LOG_INTERVAL}"   --cirr-val-eval-every "${CIRR_VAL_EVAL_EVERY}"   --multidataset-eval-every "${MULTIDATASET_EVAL_EVERY}"   --multidataset-eval-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}"   --multidataset-eval-workers "${MULTIDATASET_EVAL_WORKERS}"   --geo-weight "${GEO_WEIGHT}"   --geo-seed "${GEO_SEED}"   --geo-lr "${GEO_LR}"   --geo-beta1 "${GEO_BETA1}"   --geo-beta2 "${GEO_BETA2}"   --geo-eps "${GEO_EPS}"   --geo-wd "${GEO_WD}"   --geo-warmup "${GEO_WARMUP_STEPS}"   --geo-lora-r "${GEO_LORA_R}"   --geo-lora-alpha "${GEO_LORA_ALPHA}"   --geo-lora-dropout "${GEO_LORA_DROPOUT}"   --geo-amp-init-scale "${GEO_AMP_INIT_SCALE}"   --geo-amp-growth-factor "${GEO_AMP_GROWTH_FACTOR}"   --geo-amp-backoff-factor "${GEO_AMP_BACKOFF_FACTOR}"   --geo-amp-growth-interval "${GEO_AMP_GROWTH_INTERVAL}"   --geo-ema-decay "${GEO_EMA_DECAY}"   --geo-reverse-weight "${GEO_REVERSE_WEIGHT}"   --geo-reverse-margin "${GEO_REVERSE_MARGIN}"   --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}"   --geo-sampling-mode "${GEO_SAMPLING_MODE}"   --geo-topk "${GEO_TOPK}"   --geo-embed-norm-eps "${GEO_EMBED_NORM_EPS}"   --geo-delta-norm-eps "${GEO_DELTA_NORM_EPS}"   --geo-delta-min-norm "${GEO_DELTA_MIN_NORM}"   --dist-url "${DIST_URL}"   "${EXTRA_ARGS[@]}"
 
-if [[ -n "${WATCHER_PID}" ]]; then
-  wait "${WATCHER_PID}"
-  WATCHER_PID=""
-fi
-
-if [[ -f "${STANDALONE_JSONL}" && -f "${MERGED_JSONL}" ]]; then
-  python data/build_cirr_eval_table.py \
-    --standalone-log "${STANDALONE_JSONL}" \
-    --merged-log "${MERGED_JSONL}" \
-    --output "${SUMMARY_TSV}"
-  echo "Saved CIRR summary table to ${SUMMARY_TSV}"
-fi
+for pid in "${WATCHER_PIDS[@]:-}"; do
+  wait "${pid}"
+done

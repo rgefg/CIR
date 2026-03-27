@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -15,10 +16,16 @@ FINAL_RAW_RE = re.compile(r"epoch_(?P<epoch>\d+)\.pt$")
 FINAL_EMA_RE = re.compile(r"epoch_(?P<epoch>\d+)_ema\.pt$")
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_MERGE_SCRIPT = REPO_ROOT / "data" / "merge_lora_ties.py"
+DEFAULT_EVAL_SCRIPT = REPO_ROOT / "data" / "eval_multidataset_suite.py"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Watch checkpoints and run periodic FashionIQ + GeneCIS evaluation."
+        description="Watch checkpoints and run compact standalone or merged FashionIQ + GeneCIS evaluation."
     )
+    parser.add_argument("--mode", choices=["standalone", "merged"], default="standalone")
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
     parser.add_argument("--output-jsonl", type=Path, required=True)
     parser.add_argument("--eval-gpu", type=int, required=True)
@@ -30,42 +37,23 @@ def parse_args():
     parser.add_argument("--nice", type=int, default=0)
     parser.add_argument("--cpu-affinity", type=str, default=None)
     parser.add_argument("--cpu-threads", type=int, default=1)
-    parser.add_argument("--checkpoint-kind", choices=["raw", "ema"], default="ema")
+    parser.add_argument("--datasets", type=str, default="fashioniq,genecis")
+    parser.add_argument("--min-step", type=int, default=0)
     parser.add_argument("--stop-on-final", action="store_true", default=False)
+
+    parser.add_argument("--checkpoint-kind", choices=["raw", "ema"], default="raw")
+
+    parser.add_argument("--base-kind", choices=["raw", "ema"], default="raw")
+    parser.add_argument("--geo-kind", choices=["raw", "ema"], default="ema")
+    parser.add_argument("--merge-script", type=Path, default=DEFAULT_MERGE_SCRIPT)
+    parser.add_argument("--merge-weight-a", type=float, default=0.5)
+    parser.add_argument("--merge-weight-b", type=float, default=0.5)
+    parser.add_argument("--merge-density", type=float, default=0.9)
+    parser.add_argument("--merge-alpha-a", type=float, default=16.0)
+    parser.add_argument("--merge-rank-a", type=int, default=64)
+    parser.add_argument("--merge-alpha-b", type=float, default=16.0)
+    parser.add_argument("--merge-rank-b", type=int, default=64)
     return parser.parse_args()
-
-
-def parse_tag(path: Path, checkpoint_kind: str):
-    name = path.name
-    if checkpoint_kind == "ema":
-        step_match = STEP_EMA_RE.search(name)
-        final_match = FINAL_EMA_RE.search(name)
-    else:
-        step_match = STEP_RAW_RE.search(name)
-        final_match = FINAL_RAW_RE.search(name)
-
-    if step_match:
-        epoch = int(step_match.group("epoch"))
-        step = int(step_match.group("step"))
-        return {
-            "epoch": epoch,
-            "step": step,
-            "tag": f"epoch{epoch}_step{step}_{checkpoint_kind}",
-            "sort_key": (epoch, step, 0),
-            "is_final": False,
-            "checkpoint_kind": checkpoint_kind,
-        }
-    if final_match:
-        epoch = int(final_match.group("epoch"))
-        return {
-            "epoch": epoch,
-            "step": None,
-            "tag": f"epoch{epoch}_final_{checkpoint_kind}",
-            "sort_key": (epoch, 10**9, 1),
-            "is_final": True,
-            "checkpoint_kind": checkpoint_kind,
-        }
-    return None
 
 
 def parse_cpu_affinity(spec: str):
@@ -114,12 +102,6 @@ def run_command(cmd, timeout, env=None):
     return completed.returncode, completed.stdout
 
 
-def append_record(path: Path, record: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-
 def load_processed(path: Path):
     processed = set()
     if not path.exists():
@@ -139,6 +121,110 @@ def load_processed(path: Path):
     return processed
 
 
+def append_record(path: Path, record: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def parse_base_tag(path: Path, checkpoint_kind: str):
+    name = path.name
+    if checkpoint_kind == "ema":
+        step_match = STEP_EMA_RE.search(name)
+        final_match = FINAL_EMA_RE.search(name)
+    else:
+        step_match = STEP_RAW_RE.search(name)
+        final_match = FINAL_RAW_RE.search(name)
+
+    if step_match:
+        epoch = int(step_match.group("epoch"))
+        step = int(step_match.group("step"))
+        return {
+            "epoch": epoch,
+            "step": step,
+            "is_final": False,
+            "sort_key": (epoch, step, 0),
+            "tag_base": f"epoch{epoch}_step{step}",
+        }
+    if final_match:
+        epoch = int(final_match.group("epoch"))
+        return {
+            "epoch": epoch,
+            "step": None,
+            "is_final": True,
+            "sort_key": (epoch, 10**9, 1),
+            "tag_base": f"epoch{epoch}_final",
+        }
+    return None
+
+
+def geo_counterpart(base_path: Path, base_meta: dict, geo_kind: str):
+    epoch = base_meta["epoch"]
+    step = base_meta["step"]
+    if step is None:
+        suffix = "_ema" if geo_kind == "ema" else ""
+        return base_path.parent / f"epoch_{epoch}_geo_lora{suffix}.pt"
+    suffix = "_ema" if geo_kind == "ema" else ""
+    return base_path.parent / f"epoch_{epoch}_step_{step}_geo_lora{suffix}.pt"
+
+
+def build_eval_record(tag: str, step, mode: str, metrics: dict, extra: dict | None = None):
+    record = {
+        "tag": tag,
+        "step": step,
+        "mode": mode,
+    }
+    if extra:
+        record.update(extra)
+    record.update(metrics)
+    return record
+
+
+def maybe_compact_metrics(metrics: dict):
+    out = {}
+    if "fashioniq" in metrics:
+        out["fashioniq"] = metrics["fashioniq"]
+    if "genecis" in metrics:
+        out["genecis"] = metrics["genecis"]
+    if "circo_val" in metrics:
+        out["circo_val"] = metrics["circo_val"]
+    return out
+
+
+def evaluate_checkpoint(eval_script: Path, resume_path: Path, args, limited_env, eval_name: str):
+    with tempfile.NamedTemporaryFile(prefix=f"{eval_name}_", suffix=".json", dir="/tmp", delete=False) as tmp_file:
+        tmp_output = Path(tmp_file.name)
+    eval_env = dict(limited_env)
+    eval_env["CUDA_VISIBLE_DEVICES"] = str(args.eval_gpu)
+    eval_cmd = [
+        sys.executable,
+        str(eval_script),
+        "--resume",
+        str(resume_path),
+        "--output-json",
+        str(tmp_output),
+        "--gpu",
+        "0",
+        "--batch-size",
+        str(args.batch_size),
+        "--workers",
+        str(args.workers),
+        "--genecis-batch-size",
+        str(args.genecis_batch_size),
+        "--datasets",
+        args.datasets,
+        "--name",
+        eval_name,
+    ]
+    code, output = run_command(eval_cmd, timeout=args.timeout, env=eval_env)
+    metrics = None
+    if code == 0 and tmp_output.exists():
+        with open(tmp_output, "r", encoding="utf-8") as f:
+            metrics = json.load(f)
+    tmp_output.unlink(missing_ok=True)
+    return code, output, metrics
+
+
 def main():
     args = parse_args()
     if args.cpu_affinity:
@@ -152,61 +238,107 @@ def main():
     while True:
         candidates = []
         for path in args.checkpoint_dir.glob("*.pt"):
-            if "_geo_lora" in path.name:
-                continue
-            tag = parse_tag(path, args.checkpoint_kind)
-            if tag is None or tag["tag"] in processed:
-                continue
-            candidates.append((tag["sort_key"], path, tag))
+            if args.mode == "standalone":
+                if "_geo_lora" in path.name:
+                    continue
+                meta = parse_base_tag(path, args.checkpoint_kind)
+                if meta is None:
+                    continue
+                if meta["step"] is not None and meta["step"] < args.min_step:
+                    continue
+                tag = f"{meta['tag_base']}_{args.checkpoint_kind}_standalone"
+                if tag in processed:
+                    continue
+                candidates.append((meta["sort_key"], path, meta, tag, None))
+            else:
+                if "_geo_lora" in path.name:
+                    continue
+                meta = parse_base_tag(path, args.base_kind)
+                if meta is None:
+                    continue
+                if meta["step"] is not None and meta["step"] < args.min_step:
+                    continue
+                geo_path = geo_counterpart(path, meta, args.geo_kind)
+                if not geo_path.exists():
+                    continue
+                tag = f"{meta['tag_base']}_{args.base_kind}_plus_geo{args.geo_kind}_merged"
+                if tag in processed:
+                    continue
+                candidates.append((meta["sort_key"], path, meta, tag, geo_path))
+
         candidates.sort()
 
-        for _, ckpt_path, tag in candidates:
-            with tempfile.NamedTemporaryFile(
-                prefix=f"{tag['tag']}_multieval_",
-                suffix=".json",
-                dir="/tmp",
-                delete=False,
-            ) as tmp_file:
-                tmp_output = Path(tmp_file.name)
+        for _, ckpt_path, meta, tag, geo_path in candidates:
+            eval_target = ckpt_path
+            temp_merged = None
+            if args.mode == "merged":
+                with tempfile.NamedTemporaryFile(prefix=f"{tag}_", suffix=".pt", dir="/tmp", delete=False) as tmp_file:
+                    temp_merged = Path(tmp_file.name)
+                merge_cmd = [
+                    sys.executable,
+                    str(args.merge_script),
+                    "--ckpt-a",
+                    str(ckpt_path),
+                    "--ckpt-b",
+                    str(geo_path),
+                    "--output",
+                    str(temp_merged),
+                    "--weights",
+                    str(args.merge_weight_a),
+                    str(args.merge_weight_b),
+                    "--density",
+                    str(args.merge_density),
+                    "--text-only",
+                    "--base",
+                    "a",
+                    "--include-b-only",
+                    "--alpha-a",
+                    str(args.merge_alpha_a),
+                    "--rank-a",
+                    str(args.merge_rank_a),
+                    "--alpha-b",
+                    str(args.merge_alpha_b),
+                    "--rank-b",
+                    str(args.merge_rank_b),
+                    "--slim-output",
+                ]
+                merge_code, merge_output = run_command(merge_cmd, timeout=args.timeout, env=limited_env)
+                if merge_code != 0:
+                    print(f"[watch_multidataset_eval] merge failed for {tag}\n{merge_output[-4000:]}", flush=True)
+                    processed.add(tag)
+                    temp_merged.unlink(missing_ok=True)
+                    continue
+                eval_target = temp_merged
 
-            eval_env = dict(limited_env)
-            eval_env["CUDA_VISIBLE_DEVICES"] = str(args.eval_gpu)
-            eval_cmd = [
-                "python",
-                "data/eval_multidataset_suite.py",
-                "--resume",
-                str(ckpt_path),
-                "--output-json",
-                str(tmp_output),
-                "--gpu",
-                "0",
-                "--batch-size",
-                str(args.batch_size),
-                "--workers",
-                str(args.workers),
-                "--genecis-batch-size",
-                str(args.genecis_batch_size),
-                "--datasets",
-                "fashioniq,genecis",
-                "--name",
-                f"multidataset_eval_{tag['tag']}",
-            ]
-            eval_code, eval_output = run_command(eval_cmd, timeout=args.timeout, env=eval_env)
-            record = {
-                **tag,
-                "checkpoint": str(ckpt_path),
-                "created_at": time.time(),
-                "status": "ok" if eval_code == 0 else "eval_failed",
-                "eval_output_tail": eval_output[-4000:],
-            }
-            if eval_code == 0 and tmp_output.exists():
-                with open(tmp_output, "r", encoding="utf-8") as f:
-                    record["metrics"] = json.load(f)
+            eval_code, eval_output, metrics = evaluate_checkpoint(
+                DEFAULT_EVAL_SCRIPT,
+                eval_target,
+                args,
+                limited_env,
+                f"multidataset_{tag}",
+            )
+            if eval_code != 0 or metrics is None:
+                print(f"[watch_multidataset_eval] eval failed for {tag}\n{eval_output[-4000:]}", flush=True)
+                processed.add(tag)
+                if temp_merged is not None:
+                    temp_merged.unlink(missing_ok=True)
+                continue
+
+            compact_metrics = maybe_compact_metrics(metrics)
+            if args.mode == "standalone":
+                extra = {"checkpoint_kind": args.checkpoint_kind}
+            else:
+                extra = {
+                    "base_kind": args.base_kind,
+                    "geo_kind": args.geo_kind,
+                }
+            record = build_eval_record(tag, meta["step"], args.mode, compact_metrics, extra)
             append_record(args.output_jsonl, record)
-            processed.add(tag["tag"])
-            tmp_output.unlink(missing_ok=True)
+            processed.add(tag)
+            if temp_merged is not None:
+                temp_merged.unlink(missing_ok=True)
 
-            if tag["is_final"] and args.stop_on_final:
+            if meta["is_final"] and args.stop_on_final:
                 return
 
         time.sleep(max(1, args.poll_interval))

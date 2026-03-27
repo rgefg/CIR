@@ -224,14 +224,16 @@ def main() -> None:
 
    base_ckpt = ckpt_b if args.base == "b" else ckpt_a
    if isinstance(base_ckpt, dict) and "state_dict" in base_ckpt and isinstance(base_ckpt["state_dict"], dict):
-      out_ckpt = (
-         {
+      if args.slim_output:
+         out_ckpt = {
             "state_dict": dict(base_ckpt["state_dict"]),
             "state_dict_img2text": base_ckpt.get("state_dict_img2text"),
          }
-         if args.slim_output
-         else dict(base_ckpt)
-      )
+         for meta_key in ["epoch", "name", "step", "global_step"]:
+            if meta_key in base_ckpt:
+               out_ckpt[meta_key] = base_ckpt[meta_key]
+      else:
+         out_ckpt = dict(base_ckpt)
       out_sd = dict(base_ckpt["state_dict"])
       replaced = 0
       for k, v in merged_AB.items():
