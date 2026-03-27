@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument("--datasets", type=str, default="fashioniq,genecis")
     parser.add_argument("--min-step", type=int, default=0)
     parser.add_argument("--stop-on-final", action="store_true", default=False)
+    parser.add_argument("--once", action="store_true", default=False)
 
     parser.add_argument("--checkpoint-kind", choices=["raw", "ema"], default="raw")
 
@@ -268,7 +269,9 @@ def main():
 
         candidates.sort()
 
+        processed_any = False
         for _, ckpt_path, meta, tag, geo_path in candidates:
+            processed_any = True
             eval_target = ckpt_path
             temp_merged = None
             if args.mode == "merged":
@@ -307,6 +310,8 @@ def main():
                     print(f"[watch_multidataset_eval] merge failed for {tag}\n{merge_output[-4000:]}", flush=True)
                     processed.add(tag)
                     temp_merged.unlink(missing_ok=True)
+                    if meta["is_final"] and args.stop_on_final:
+                        raise SystemExit(1)
                     continue
                 eval_target = temp_merged
 
@@ -322,6 +327,8 @@ def main():
                 processed.add(tag)
                 if temp_merged is not None:
                     temp_merged.unlink(missing_ok=True)
+                if meta["is_final"] and args.stop_on_final:
+                    raise SystemExit(1)
                 continue
 
             compact_metrics = maybe_compact_metrics(metrics)
@@ -341,6 +348,11 @@ def main():
             if meta["is_final"] and args.stop_on_final:
                 return
 
+        if args.once:
+            return
+        if not processed_any and args.stop_on_final:
+            time.sleep(max(1, args.poll_interval))
+            continue
         time.sleep(max(1, args.poll_interval))
 
 
