@@ -460,6 +460,15 @@ def parse_args():
     parser.add_argument("--lora-dropout", type=float, default=0.0)
     parser.add_argument("--instruction-dropout-prob", type=float, default=0.0,
                         help="Drop probability for the whole instruction string in the retrieval branch.")
+    parser.add_argument(
+        "--instruction-prompt-style",
+        type=str,
+        default="single",
+        choices=["single", "duplicate_and"],
+        help="How to format the retrieval instruction prompt during training. "
+             "'single' keeps 'a photo of * and inst'; 'duplicate_and' uses "
+             "'a photo of * that inst and inst' to mimic FashionIQ's two-clause style.",
+    )
     parser.add_argument("--amp-init-scale", type=float, default=65536.0,
                         help="GradScaler init scale for the retrieval branch.")
     parser.add_argument("--amp-growth-factor", type=float, default=2.0,

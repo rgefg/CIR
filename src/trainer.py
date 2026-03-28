@@ -127,6 +127,17 @@ def _safe_l2_normalize(x, dim=-1, eps=1e-6):
     return x / x.norm(dim=dim, keepdim=True).clamp_min(eps)
 
 
+def _build_retrieval_prompt(instruction, placeholder, args):
+    inst_str = _to_text(instruction).strip()
+    if not inst_str:
+        return f"a photo of {placeholder}"
+
+    prompt_style = getattr(args, "instruction_prompt_style", "single")
+    if prompt_style == "duplicate_and":
+        return f"a photo of {placeholder} that {inst_str} and {inst_str}"
+    return f"a photo of {placeholder} and {inst_str}"
+
+
 def _to_text(x):
     if x is None:
         return ""
@@ -336,14 +347,7 @@ def get_loss_lcom_cc3m(model, img2text, ref_images, instructions, modified_capti
     
     # Handle empty instructions (from instruction dropout)
     # When instruction is empty, use simple prompt to force model to rely on visual features
-    prompts = []
-    for inst in instructions:
-        inst_str = str(inst).strip()
-        if not inst_str:
-            # Empty instruction: use generic prompt or just placeholder
-            prompts.append(f"a photo of {placeholder}")
-        else:
-            prompts.append(f"a photo of {placeholder} and {inst_str}")
+    prompts = [_build_retrieval_prompt(inst, placeholder, args) for inst in instructions]
     
     # Use truncate=True to automatically truncate prompts that exceed context length (77 tokens)
     prompt_tokens = tokenize(prompts, truncate=True).to(device, non_blocking=True)
@@ -802,13 +806,7 @@ def get_loss_lcom_textprobe_cc3m(model, img2text, ref_images, instructions, modi
 
     placeholder = getattr(args, "prompt_placeholder", "*")
     placeholder_token_id = int(tokenize([placeholder])[0][1].item())
-    prompts = []
-    for inst in instructions:
-        inst_str = _to_text(inst).strip()
-        if not inst_str:
-            prompts.append(f"a photo of {placeholder}")
-        else:
-            prompts.append(f"a photo of {placeholder} and {inst_str}")
+    prompts = [_build_retrieval_prompt(inst, placeholder, args) for inst in instructions]
     prompt_tokens = tokenize(prompts, truncate=True).to(device, non_blocking=True)
     query_features = model.encode_text_img_vis(prompt_tokens, token_features, split_ind=placeholder_token_id)
     query_features = query_features / query_features.norm(dim=-1, keepdim=True)

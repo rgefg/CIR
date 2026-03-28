@@ -5,9 +5,9 @@ export PYTHONPATH="/data2/mingyu/composed_image_retrieval:/data2/mingyu/composed
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 PYTHON_BIN="${PYTHON_BIN:-/data2/mingyu/miniconda3/envs/torch/bin/python}"
 
-DIST_URL="${DIST_URL:-tcp://127.0.0.1:6152}"
+DIST_URL="${DIST_URL:-tcp://127.0.0.1:6153}"
 TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-6,7}}"
-RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1700_QKV_StrictLoss_NoDrop_PosthocFashionGeneCIS}"
+RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1000_QKV_StrictLoss_NoDrop_PosthocFashionGeneCIS_Exp1}"
 POSTHOC_STANDALONE_GPU="${POSTHOC_STANDALONE_GPU:-6}"
 POSTHOC_MERGED_GPU="${POSTHOC_MERGED_GPU:-7}"
 
@@ -21,11 +21,11 @@ PIC2WORD_CKPT="${PIC2WORD_CKPT:-/data2/mingyu/composed_image_retrieval/checkpoin
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-56}"
 TRAIN_ACCUM_STEPS="${TRAIN_ACCUM_STEPS:-8}"
 TRAIN_WORKERS="${TRAIN_WORKERS:-2}"
-TRAIN_EPOCH_STEPS="${TRAIN_EPOCH_STEPS:-1700}"
+TRAIN_EPOCH_STEPS="${TRAIN_EPOCH_STEPS:-1000}"
 WARMUP_STEPS="${WARMUP_STEPS:-200}"
 SAVE_STEP_INTERVAL="${SAVE_STEP_INTERVAL:-200}"
-SAVE_STEP_START="${SAVE_STEP_START:-800}"
-SAVE_STEP_END="${SAVE_STEP_END:-1600}"
+SAVE_STEP_START="${SAVE_STEP_START:-200}"
+SAVE_STEP_END="${SAVE_STEP_END:-1000}"
 LOG_INTERVAL="${LOG_INTERVAL:-25}"
 CIRR_VAL_EVAL_EVERY="${CIRR_VAL_EVAL_EVERY:-0}"
 MULTIDATASET_EVAL_EVERY="${MULTIDATASET_EVAL_EVERY:-0}"
@@ -78,6 +78,8 @@ GEO_DELTA_MIN_NORM="${GEO_DELTA_MIN_NORM:-1e-3}"
 GEO_SAMPLING_MODE="${GEO_SAMPLING_MODE:-hard}"
 GEO_TOPK="${GEO_TOPK:-8}"
 INSTRUCTION_DROPOUT_PROB="${INSTRUCTION_DROPOUT_PROB:-0.0}"
+INSTRUCTION_PROMPT_STYLE="${INSTRUCTION_PROMPT_STYLE:-single}"
+RESET_LOGIT_SCALE="${RESET_LOGIT_SCALE:-1}"
 CONFLICT_PROBE="${CONFLICT_PROBE:-0}"
 CONFLICT_PROBE_EVERY="${CONFLICT_PROBE_EVERY:-25}"
 CONFLICT_PROBE_START="${CONFLICT_PROBE_START:-25}"
@@ -162,6 +164,8 @@ echo "EMA save checkpoints: ${ENABLE_EMA_SAVE_CHECKPOINTS}"
 echo "Geo strict loss: reverse_weight=${GEO_REVERSE_WEIGHT}, reverse_margin=${GEO_REVERSE_MARGIN}, zero_loss_weight=${GEO_ZERO_LOSS_WEIGHT}"
 echo "Geo sampling: mode=${GEO_SAMPLING_MODE}, topk=${GEO_TOPK}"
 echo "Instruction dropout prob: ${INSTRUCTION_DROPOUT_PROB}"
+echo "Instruction prompt style: ${INSTRUCTION_PROMPT_STYLE}"
+echo "Reset logit scale: ${RESET_LOGIT_SCALE}"
 echo "Conflict probe: enabled=${CONFLICT_PROBE}, every=${CONFLICT_PROBE_EVERY}, start=${CONFLICT_PROBE_START}, end=${CONFLICT_PROBE_END}"
 echo "Geo norm eps: embed=${GEO_EMBED_NORM_EPS}, delta=${GEO_DELTA_NORM_EPS}, min_delta=${GEO_DELTA_MIN_NORM}"
 echo "Watcher isolation: affinity=${WATCHER_CPU_AFFINITY}, nice=${WATCHER_NICE}, cpu_threads=${WATCHER_CPU_THREADS}, eval_workers=${WATCHER_EVAL_WORKERS}"
@@ -188,6 +192,9 @@ fi
 if [[ "${ENABLE_EMA_SAVE_CHECKPOINTS}" == "1" ]]; then
   EXTRA_ARGS+=(--ema-save-checkpoints)
 fi
+if [[ "${RESET_LOGIT_SCALE}" == "1" ]]; then
+  EXTRA_ARGS+=(--reset-logit-scale)
+fi
 if [[ "${CONFLICT_PROBE}" == "1" ]]; then
   EXTRA_ARGS+=(
     --conflict-probe
@@ -197,7 +204,7 @@ if [[ "${CONFLICT_PROBE}" == "1" ]]; then
   )
 fi
 
-CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" "${PYTHON_BIN}" -u src/main.py   --name "${RUN_NAME}"   --dataset-type cc3m_cir_wds   --cc3m-cir-jsonl "${TRAIN_JSON}"   --train-data "dummy"   --wds-shards "${WDS_SHARDS}"   --wds-epoch-steps "${TRAIN_EPOCH_STEPS}"   --wds-shuffle "${WDS_SHUFFLE}"   --wds-shardshuffle "${WDS_SHARDSHUFFLE}"   --model ViT-L/14   --pic2word-pretrained "${PIC2WORD_CKPT}"   --batch-size "${TRAIN_BATCH_SIZE}"   --accum-steps "${TRAIN_ACCUM_STEPS}"   --epochs 1   --seed "${SEED}"   --lr "${LR}"   --beta1 "${BETA1}"   --beta2 "${BETA2}"   --eps "${EPS}"   --wd "${WD}"   --warmup "${WARMUP_STEPS}"   --precision "${PRECISION}"   --amp-init-scale "${AMP_INIT_SCALE}"   --amp-growth-factor "${AMP_GROWTH_FACTOR}"   --amp-backoff-factor "${AMP_BACKOFF_FACTOR}"   --amp-growth-interval "${AMP_GROWTH_INTERVAL}"   --retrieval-ema-decay "${RETRIEVAL_EMA_DECAY}"   --workers "${TRAIN_WORKERS}"   --lora-r "${LORA_R}"   --lora-alpha "${LORA_ALPHA}"   --lora-dropout "${LORA_DROPOUT}"   --instruction-dropout-prob "${INSTRUCTION_DROPOUT_PROB}"   --reset-logit-scale   --logit-scale-clamp-min 9.0   --logit-scale-clamp-max 36.6   --logit-scale-freeze-percent 0.3   --save-frequency 1   --save-step-start "${SAVE_STEP_START}"   --save-step-end "${SAVE_STEP_END}"   --save-step-interval "${SAVE_STEP_INTERVAL}"   --log-interval "${LOG_INTERVAL}"   --cirr-val-eval-every "${CIRR_VAL_EVAL_EVERY}"   --multidataset-eval-every "${MULTIDATASET_EVAL_EVERY}"   --multidataset-eval-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}"   --multidataset-eval-workers "${MULTIDATASET_EVAL_WORKERS}"   --geo-weight "${GEO_WEIGHT}"   --geo-seed "${GEO_SEED}"   --geo-lr "${GEO_LR}"   --geo-beta1 "${GEO_BETA1}"   --geo-beta2 "${GEO_BETA2}"   --geo-eps "${GEO_EPS}"   --geo-wd "${GEO_WD}"   --geo-warmup "${GEO_WARMUP_STEPS}"   --geo-lora-r "${GEO_LORA_R}"   --geo-lora-alpha "${GEO_LORA_ALPHA}"   --geo-lora-dropout "${GEO_LORA_DROPOUT}"   --geo-amp-init-scale "${GEO_AMP_INIT_SCALE}"   --geo-amp-growth-factor "${GEO_AMP_GROWTH_FACTOR}"   --geo-amp-backoff-factor "${GEO_AMP_BACKOFF_FACTOR}"   --geo-amp-growth-interval "${GEO_AMP_GROWTH_INTERVAL}"   --geo-ema-decay "${GEO_EMA_DECAY}"   --geo-reverse-weight "${GEO_REVERSE_WEIGHT}"   --geo-reverse-margin "${GEO_REVERSE_MARGIN}"   --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}"   --geo-sampling-mode "${GEO_SAMPLING_MODE}"   --geo-topk "${GEO_TOPK}"   --geo-embed-norm-eps "${GEO_EMBED_NORM_EPS}"   --geo-delta-norm-eps "${GEO_DELTA_NORM_EPS}"   --geo-delta-min-norm "${GEO_DELTA_MIN_NORM}"   --dist-url "${DIST_URL}"   "${EXTRA_ARGS[@]}"
+CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" "${PYTHON_BIN}" -u src/main.py   --name "${RUN_NAME}"   --dataset-type cc3m_cir_wds   --cc3m-cir-jsonl "${TRAIN_JSON}"   --train-data "dummy"   --wds-shards "${WDS_SHARDS}"   --wds-epoch-steps "${TRAIN_EPOCH_STEPS}"   --wds-shuffle "${WDS_SHUFFLE}"   --wds-shardshuffle "${WDS_SHARDSHUFFLE}"   --model ViT-L/14   --pic2word-pretrained "${PIC2WORD_CKPT}"   --batch-size "${TRAIN_BATCH_SIZE}"   --accum-steps "${TRAIN_ACCUM_STEPS}"   --epochs 1   --seed "${SEED}"   --lr "${LR}"   --beta1 "${BETA1}"   --beta2 "${BETA2}"   --eps "${EPS}"   --wd "${WD}"   --warmup "${WARMUP_STEPS}"   --precision "${PRECISION}"   --amp-init-scale "${AMP_INIT_SCALE}"   --amp-growth-factor "${AMP_GROWTH_FACTOR}"   --amp-backoff-factor "${AMP_BACKOFF_FACTOR}"   --amp-growth-interval "${AMP_GROWTH_INTERVAL}"   --retrieval-ema-decay "${RETRIEVAL_EMA_DECAY}"   --workers "${TRAIN_WORKERS}"   --lora-r "${LORA_R}"   --lora-alpha "${LORA_ALPHA}"   --lora-dropout "${LORA_DROPOUT}"   --instruction-dropout-prob "${INSTRUCTION_DROPOUT_PROB}"   --instruction-prompt-style "${INSTRUCTION_PROMPT_STYLE}"   --logit-scale-clamp-min 9.0   --logit-scale-clamp-max 36.6   --logit-scale-freeze-percent 0.3   --save-frequency 1   --save-step-start "${SAVE_STEP_START}"   --save-step-end "${SAVE_STEP_END}"   --save-step-interval "${SAVE_STEP_INTERVAL}"   --log-interval "${LOG_INTERVAL}"   --cirr-val-eval-every "${CIRR_VAL_EVAL_EVERY}"   --multidataset-eval-every "${MULTIDATASET_EVAL_EVERY}"   --multidataset-eval-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}"   --multidataset-eval-workers "${MULTIDATASET_EVAL_WORKERS}"   --geo-weight "${GEO_WEIGHT}"   --geo-seed "${GEO_SEED}"   --geo-lr "${GEO_LR}"   --geo-beta1 "${GEO_BETA1}"   --geo-beta2 "${GEO_BETA2}"   --geo-eps "${GEO_EPS}"   --geo-wd "${GEO_WD}"   --geo-warmup "${GEO_WARMUP_STEPS}"   --geo-lora-r "${GEO_LORA_R}"   --geo-lora-alpha "${GEO_LORA_ALPHA}"   --geo-lora-dropout "${GEO_LORA_DROPOUT}"   --geo-amp-init-scale "${GEO_AMP_INIT_SCALE}"   --geo-amp-growth-factor "${GEO_AMP_GROWTH_FACTOR}"   --geo-amp-backoff-factor "${GEO_AMP_BACKOFF_FACTOR}"   --geo-amp-growth-interval "${GEO_AMP_GROWTH_INTERVAL}"   --geo-ema-decay "${GEO_EMA_DECAY}"   --geo-reverse-weight "${GEO_REVERSE_WEIGHT}"   --geo-reverse-margin "${GEO_REVERSE_MARGIN}"   --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}"   --geo-sampling-mode "${GEO_SAMPLING_MODE}"   --geo-topk "${GEO_TOPK}"   --geo-embed-norm-eps "${GEO_EMBED_NORM_EPS}"   --geo-delta-norm-eps "${GEO_DELTA_NORM_EPS}"   --geo-delta-min-norm "${GEO_DELTA_MIN_NORM}"   --dist-url "${DIST_URL}"   "${EXTRA_ARGS[@]}"
 
 rm -f "${MULTIDATASET_STANDALONE_JSONL}" "${MULTIDATASET_MERGED_JSONL}" "${MULTIDATASET_STANDALONE_LOG}" "${MULTIDATASET_MERGED_LOG}"
 
