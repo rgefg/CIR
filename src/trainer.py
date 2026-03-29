@@ -131,10 +131,6 @@ def _build_retrieval_prompt(instruction, placeholder, args):
     inst_str = _to_text(instruction).strip()
     if not inst_str:
         return f"a photo of {placeholder}"
-
-    prompt_style = getattr(args, "instruction_prompt_style", "single")
-    if prompt_style == "duplicate_and":
-        return f"a photo of {placeholder} that {inst_str} and {inst_str}"
     return f"a photo of {placeholder} and {inst_str}"
 
 
