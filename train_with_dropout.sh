@@ -5,14 +5,12 @@ export PYTHONPATH="/data2/mingyu/composed_image_retrieval:/data2/mingyu/composed
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 PYTHON_BIN="${PYTHON_BIN:-/data2/mingyu/miniconda3/envs/torch/bin/python}"
 
-DIST_URL="${DIST_URL:-tcp://127.0.0.1:6160}"
+DIST_URL="${DIST_URL:-tcp://127.0.0.1:6161}"
 TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-6,7}}"
 IFS=',' read -r -a TRAIN_GPU_LIST <<< "${TRAIN_CUDA_DEVICES}"
-DEFAULT_POSTHOC_STANDALONE_GPU="${TRAIN_GPU_LIST[0]}"
-DEFAULT_POSTHOC_MERGED_GPU="${TRAIN_GPU_LIST[1]:-${TRAIN_GPU_LIST[0]}}"
-RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA800_QKV_StrictLoss_ExpA_SharedA_RetAOnly}"
-POSTHOC_STANDALONE_GPU="${POSTHOC_STANDALONE_GPU:-${DEFAULT_POSTHOC_STANDALONE_GPU}}"
-POSTHOC_MERGED_GPU="${POSTHOC_MERGED_GPU:-${DEFAULT_POSTHOC_MERGED_GPU}}"
+POSTHOC_CIRR_GPU="${POSTHOC_CIRR_GPU:-${TRAIN_GPU_LIST[0]}}"
+POSTHOC_MULTIDATASET_GPU="${POSTHOC_MULTIDATASET_GPU:-${TRAIN_GPU_LIST[1]:-${TRAIN_GPU_LIST[0]}}}"
+RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1600_QKV_HybridSharedA_Final}"
 
 TRAIN_JSON="${TRAIN_JSON:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2_with_reverse.jsonl}"
 REVERSE_JSON="${REVERSE_JSON:-}"
@@ -24,11 +22,11 @@ PIC2WORD_CKPT="${PIC2WORD_CKPT:-/data2/mingyu/composed_image_retrieval/checkpoin
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-56}"
 TRAIN_ACCUM_STEPS="${TRAIN_ACCUM_STEPS:-8}"
 TRAIN_WORKERS="${TRAIN_WORKERS:-2}"
-TRAIN_EPOCH_STEPS="${TRAIN_EPOCH_STEPS:-800}"
+TRAIN_EPOCH_STEPS="${TRAIN_EPOCH_STEPS:-1600}"
 WARMUP_STEPS="${WARMUP_STEPS:-200}"
 SAVE_STEP_INTERVAL="${SAVE_STEP_INTERVAL:-200}"
 SAVE_STEP_START="${SAVE_STEP_START:-600}"
-SAVE_STEP_END="${SAVE_STEP_END:-800}"
+SAVE_STEP_END="${SAVE_STEP_END:-1600}"
 LOG_INTERVAL="${LOG_INTERVAL:-25}"
 CIRR_VAL_EVAL_EVERY="${CIRR_VAL_EVAL_EVERY:-0}"
 MULTIDATASET_EVAL_EVERY="${MULTIDATASET_EVAL_EVERY:-0}"
@@ -83,6 +81,7 @@ GEO_TOPK="${GEO_TOPK:-8}"
 INSTRUCTION_DROPOUT_PROB="${INSTRUCTION_DROPOUT_PROB:-0.0}"
 RESET_LOGIT_SCALE="${RESET_LOGIT_SCALE:-1}"
 SHARED_A_LORA="${SHARED_A_LORA:-1}"
+SHARED_A_NUM_LAYERS="${SHARED_A_NUM_LAYERS:-6}"
 SHARED_A_RETRIEVAL_ONLY_UPDATE="${SHARED_A_RETRIEVAL_ONLY_UPDATE:-1}"
 CONFLICT_PROBE="${CONFLICT_PROBE:-0}"
 CONFLICT_PROBE_EVERY="${CONFLICT_PROBE_EVERY:-25}"
@@ -94,21 +93,15 @@ ENABLE_EMA_SAVE_CHECKPOINTS="${ENABLE_EMA_SAVE_CHECKPOINTS:-1}"
 MERGE_RETRIEVAL_WEIGHT="${MERGE_RETRIEVAL_WEIGHT:-0.5}"
 MERGE_GEO_WEIGHT="${MERGE_GEO_WEIGHT:-0.5}"
 MERGE_DENSITY="${MERGE_DENSITY:-0.9}"
-POSTHOC_MERGE_MODE="${POSTHOC_MERGE_MODE:-shared_a_sum_b}"
-ENABLE_PARALLEL_MERGE_EVAL="${ENABLE_PARALLEL_MERGE_EVAL:-0}"
-
-ENABLE_MULTIDATASET_STANDALONE_WATCHER="${ENABLE_MULTIDATASET_STANDALONE_WATCHER:-0}"
-ENABLE_MULTIDATASET_MERGED_WATCHER="${ENABLE_MULTIDATASET_MERGED_WATCHER:-0}"
+POSTHOC_MERGE_MODE="${POSTHOC_MERGE_MODE:-hybrid_layerwise}"
 MULTIDATASET_EVAL_START_STEP="${MULTIDATASET_EVAL_START_STEP:-600}"
 MULTIDATASET_DATASETS="${MULTIDATASET_DATASETS:-fashioniq,genecis}"
-MULTIDATASET_STANDALONE_KIND="${MULTIDATASET_STANDALONE_KIND:-raw}"
 MULTIDATASET_MERGED_BASE_KIND="${MULTIDATASET_MERGED_BASE_KIND:-raw}"
-MULTIDATASET_MERGED_GEO_KIND="${MULTIDATASET_MERGED_GEO_KIND:-raw}"
-MULTIDATASET_MERGED_ALT_BASE_KIND="${MULTIDATASET_MERGED_ALT_BASE_KIND:-raw}"
-MULTIDATASET_MERGED_ALT_GEO_KIND="${MULTIDATASET_MERGED_ALT_GEO_KIND:-ema}"
-RUN_POSTHOC_STANDALONE_EVAL="${RUN_POSTHOC_STANDALONE_EVAL:-1}"
+MULTIDATASET_MERGED_GEO_KIND="${MULTIDATASET_MERGED_GEO_KIND:-ema}"
+RUN_POSTHOC_CIRR_EVAL="${RUN_POSTHOC_CIRR_EVAL:-1}"
 RUN_POSTHOC_MERGED_EVAL="${RUN_POSTHOC_MERGED_EVAL:-1}"
-RUN_POSTHOC_MERGED_ALT_EVAL="${RUN_POSTHOC_MERGED_ALT_EVAL:-1}"
+POSTHOC_CIRR_BATCH_SIZE="${POSTHOC_CIRR_BATCH_SIZE:-48}"
+POSTHOC_CIRR_WORKERS="${POSTHOC_CIRR_WORKERS:-2}"
 POSTHOC_EVAL_TIMEOUT="${POSTHOC_EVAL_TIMEOUT:-21600}"
 WATCHER_CPU_AFFINITY="${WATCHER_CPU_AFFINITY:-48-63}"
 WATCHER_NICE="${WATCHER_NICE:-15}"
@@ -117,12 +110,10 @@ WATCHER_EVAL_WORKERS="${WATCHER_EVAL_WORKERS:-1}"
 
 LOG_DIR="/data2/mingyu/composed_image_retrieval/logs/${RUN_NAME}"
 CKPT_DIR="${LOG_DIR}/checkpoints"
-MULTIDATASET_STANDALONE_JSONL="${LOG_DIR}/multidataset_standalone.jsonl"
 MULTIDATASET_MERGED_JSONL="${LOG_DIR}/multidataset_merged.jsonl"
-MULTIDATASET_MERGED_ALT_JSONL="${LOG_DIR}/multidataset_merged_raw_geoema.jsonl"
-MULTIDATASET_STANDALONE_LOG="${LOG_DIR}/multidataset_standalone_watcher.log"
 MULTIDATASET_MERGED_LOG="${LOG_DIR}/multidataset_merged_watcher.log"
-MULTIDATASET_MERGED_ALT_LOG="${LOG_DIR}/multidataset_merged_raw_geoema_watcher.log"
+CIRR_MERGED_JSONL="${LOG_DIR}/cirr_val_parallel_merged_eval.jsonl"
+CIRR_MERGED_LOG="${LOG_DIR}/cirr_merged_watcher.log"
 
 mkdir -p "${CKPT_DIR}"
 
@@ -139,8 +130,8 @@ trap cleanup EXIT
 
 echo "Run name: ${RUN_NAME}"
 echo "Training GPUs: ${TRAIN_CUDA_DEVICES}"
-echo "Posthoc standalone eval GPU: ${POSTHOC_STANDALONE_GPU}"
-echo "Posthoc merged eval GPU: ${POSTHOC_MERGED_GPU}"
+echo "Posthoc CIRR eval GPU: ${POSTHOC_CIRR_GPU}"
+echo "Posthoc FashionIQ/GeneCIS eval GPU: ${POSTHOC_MULTIDATASET_GPU}"
 echo "Base retrieval JSON: ${TRAIN_JSON}"
 echo "Reverse sidecar JSON: ${REVERSE_JSON}"
 echo "Train batch size per GPU: ${TRAIN_BATCH_SIZE}"
@@ -150,10 +141,8 @@ echo "Warmup steps: ${WARMUP_STEPS}"
 echo "WDS shuffle: samples=${WDS_SHUFFLE}, shards=${WDS_SHARDSHUFFLE}"
 echo "CIRR val every: ${CIRR_VAL_EVAL_EVERY}"
 echo "FashionIQ/GeneCIS in-process eval every: ${MULTIDATASET_EVAL_EVERY}"
-echo "FashionIQ/GeneCIS live standalone watcher: enabled=${ENABLE_MULTIDATASET_STANDALONE_WATCHER}, kind=${MULTIDATASET_STANDALONE_KIND}, start_step=${MULTIDATASET_EVAL_START_STEP}"
-echo "FashionIQ/GeneCIS live merged watcher: enabled=${ENABLE_MULTIDATASET_MERGED_WATCHER}, base=${MULTIDATASET_MERGED_BASE_KIND}, geo=${MULTIDATASET_MERGED_GEO_KIND}, start_step=${MULTIDATASET_EVAL_START_STEP}"
-echo "FashionIQ/GeneCIS posthoc standalone eval: enabled=${RUN_POSTHOC_STANDALONE_EVAL}, kind=${MULTIDATASET_STANDALONE_KIND}, gpu=${POSTHOC_STANDALONE_GPU}"
-echo "FashionIQ/GeneCIS posthoc merged eval: enabled=${RUN_POSTHOC_MERGED_EVAL}, base=${MULTIDATASET_MERGED_BASE_KIND}, geo=${MULTIDATASET_MERGED_GEO_KIND}, gpu=${POSTHOC_MERGED_GPU}"
+echo "Posthoc CIRR merged eval: enabled=${RUN_POSTHOC_CIRR_EVAL}, base=${MULTIDATASET_MERGED_BASE_KIND}, geo=${MULTIDATASET_MERGED_GEO_KIND}, gpu=${POSTHOC_CIRR_GPU}"
+echo "Posthoc FashionIQ/GeneCIS merged eval: enabled=${RUN_POSTHOC_MERGED_EVAL}, base=${MULTIDATASET_MERGED_BASE_KIND}, geo=${MULTIDATASET_MERGED_GEO_KIND}, gpu=${POSTHOC_MULTIDATASET_GPU}"
 echo "FashionIQ/GeneCIS datasets: ${MULTIDATASET_DATASETS}"
 echo "FashionIQ/GeneCIS batch/workers: batch=${MULTIDATASET_EVAL_BATCH_SIZE}, workers=${MULTIDATASET_EVAL_WORKERS}"
 echo "Seed: ${SEED}"
@@ -176,10 +165,9 @@ echo "Geo sampling: mode=${GEO_SAMPLING_MODE}, topk=${GEO_TOPK}"
 echo "Instruction dropout prob: ${INSTRUCTION_DROPOUT_PROB}"
 echo "Reset logit scale: ${RESET_LOGIT_SCALE}"
 echo "Shared-A LoRA: ${SHARED_A_LORA}"
+echo "Shared-A shallow layers: ${SHARED_A_NUM_LAYERS}"
 echo "Shared-A retrieval-only update: ${SHARED_A_RETRIEVAL_ONLY_UPDATE}"
 echo "Posthoc merge mode: ${POSTHOC_MERGE_MODE}"
-echo "Posthoc merged eval A: base=${MULTIDATASET_MERGED_BASE_KIND}, geo=${MULTIDATASET_MERGED_GEO_KIND}, gpu=${POSTHOC_MERGED_GPU}"
-echo "Posthoc merged eval B: base=${MULTIDATASET_MERGED_ALT_BASE_KIND}, geo=${MULTIDATASET_MERGED_ALT_GEO_KIND}, gpu=${POSTHOC_MERGED_GPU}"
 echo "Conflict probe: enabled=${CONFLICT_PROBE}, every=${CONFLICT_PROBE_EVERY}, start=${CONFLICT_PROBE_START}, end=${CONFLICT_PROBE_END}"
 echo "Geo norm eps: embed=${GEO_EMBED_NORM_EPS}, delta=${GEO_DELTA_NORM_EPS}, min_delta=${GEO_DELTA_MIN_NORM}"
 echo "Watcher isolation: affinity=${WATCHER_CPU_AFFINITY}, nice=${WATCHER_NICE}, cpu_threads=${WATCHER_CPU_THREADS}, eval_workers=${WATCHER_EVAL_WORKERS}"
@@ -212,6 +200,7 @@ fi
 if [[ "${SHARED_A_LORA}" == "1" ]]; then
   EXTRA_ARGS+=(--shared-a-lora)
 fi
+EXTRA_ARGS+=(--shared-a-num-layers "${SHARED_A_NUM_LAYERS}")
 if [[ "${SHARED_A_RETRIEVAL_ONLY_UPDATE}" == "1" ]]; then
   EXTRA_ARGS+=(--shared-a-retrieval-only-update)
 fi
@@ -226,36 +215,14 @@ fi
 
 CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" "${PYTHON_BIN}" -u src/main.py   --name "${RUN_NAME}"   --dataset-type cc3m_cir_wds   --cc3m-cir-jsonl "${TRAIN_JSON}"   --train-data "dummy"   --wds-shards "${WDS_SHARDS}"   --wds-epoch-steps "${TRAIN_EPOCH_STEPS}"   --wds-shuffle "${WDS_SHUFFLE}"   --wds-shardshuffle "${WDS_SHARDSHUFFLE}"   --model ViT-L/14   --pic2word-pretrained "${PIC2WORD_CKPT}"   --batch-size "${TRAIN_BATCH_SIZE}"   --accum-steps "${TRAIN_ACCUM_STEPS}"   --epochs 1   --seed "${SEED}"   --lr "${LR}"   --beta1 "${BETA1}"   --beta2 "${BETA2}"   --eps "${EPS}"   --wd "${WD}"   --warmup "${WARMUP_STEPS}"   --precision "${PRECISION}"   --amp-init-scale "${AMP_INIT_SCALE}"   --amp-growth-factor "${AMP_GROWTH_FACTOR}"   --amp-backoff-factor "${AMP_BACKOFF_FACTOR}"   --amp-growth-interval "${AMP_GROWTH_INTERVAL}"   --retrieval-ema-decay "${RETRIEVAL_EMA_DECAY}"   --workers "${TRAIN_WORKERS}"   --lora-r "${LORA_R}"   --lora-alpha "${LORA_ALPHA}"   --lora-dropout "${LORA_DROPOUT}"   --instruction-dropout-prob "${INSTRUCTION_DROPOUT_PROB}"   --logit-scale-clamp-min 9.0   --logit-scale-clamp-max 36.6   --logit-scale-freeze-percent 0.3   --save-frequency 1   --save-step-start "${SAVE_STEP_START}"   --save-step-end "${SAVE_STEP_END}"   --save-step-interval "${SAVE_STEP_INTERVAL}"   --log-interval "${LOG_INTERVAL}"   --cirr-val-eval-every "${CIRR_VAL_EVAL_EVERY}"   --multidataset-eval-every "${MULTIDATASET_EVAL_EVERY}"   --multidataset-eval-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}"   --multidataset-eval-workers "${MULTIDATASET_EVAL_WORKERS}"   --geo-weight "${GEO_WEIGHT}"   --geo-seed "${GEO_SEED}"   --geo-lr "${GEO_LR}"   --geo-beta1 "${GEO_BETA1}"   --geo-beta2 "${GEO_BETA2}"   --geo-eps "${GEO_EPS}"   --geo-wd "${GEO_WD}"   --geo-warmup "${GEO_WARMUP_STEPS}"   --geo-lora-r "${GEO_LORA_R}"   --geo-lora-alpha "${GEO_LORA_ALPHA}"   --geo-lora-dropout "${GEO_LORA_DROPOUT}"   --geo-amp-init-scale "${GEO_AMP_INIT_SCALE}"   --geo-amp-growth-factor "${GEO_AMP_GROWTH_FACTOR}"   --geo-amp-backoff-factor "${GEO_AMP_BACKOFF_FACTOR}"   --geo-amp-growth-interval "${GEO_AMP_GROWTH_INTERVAL}"   --geo-ema-decay "${GEO_EMA_DECAY}"   --geo-reverse-weight "${GEO_REVERSE_WEIGHT}"   --geo-reverse-margin "${GEO_REVERSE_MARGIN}"   --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}"   --geo-sampling-mode "${GEO_SAMPLING_MODE}"   --geo-topk "${GEO_TOPK}"   --geo-embed-norm-eps "${GEO_EMBED_NORM_EPS}"   --geo-delta-norm-eps "${GEO_DELTA_NORM_EPS}"   --geo-delta-min-norm "${GEO_DELTA_MIN_NORM}"   --dist-url "${DIST_URL}"   "${EXTRA_ARGS[@]}"
 
-rm -f "${MULTIDATASET_STANDALONE_JSONL}" "${MULTIDATASET_MERGED_JSONL}" "${MULTIDATASET_MERGED_ALT_JSONL}" "${MULTIDATASET_STANDALONE_LOG}" "${MULTIDATASET_MERGED_LOG}" "${MULTIDATASET_MERGED_ALT_LOG}"
-
-if [[ "${RUN_POSTHOC_STANDALONE_EVAL}" == "1" ]]; then
-  "${PYTHON_BIN}" data/watch_multidataset_eval.py \
-    --mode standalone \
-    --checkpoint-dir "${CKPT_DIR}" \
-    --output-jsonl "${MULTIDATASET_STANDALONE_JSONL}" \
-    --eval-gpu "${POSTHOC_STANDALONE_GPU}" \
-    --batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}" \
-    --workers "${MULTIDATASET_EVAL_WORKERS}" \
-    --genecis-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}" \
-    --datasets "${MULTIDATASET_DATASETS}" \
-    --checkpoint-kind "${MULTIDATASET_STANDALONE_KIND}" \
-    --min-step "${MULTIDATASET_EVAL_START_STEP}" \
-    --nice "${WATCHER_NICE}" \
-    --cpu-affinity "${WATCHER_CPU_AFFINITY}" \
-    --cpu-threads "${WATCHER_CPU_THREADS}" \
-    --poll-interval 1 \
-    --timeout "${POSTHOC_EVAL_TIMEOUT}" \
-    --stop-on-final \
-    --once > "${MULTIDATASET_STANDALONE_LOG}" 2>&1 &
-  WATCHER_PIDS+=("$!")
-fi
+rm -f "${MULTIDATASET_MERGED_JSONL}" "${MULTIDATASET_MERGED_LOG}" "${CIRR_MERGED_JSONL}" "${CIRR_MERGED_LOG}"
 
 if [[ "${RUN_POSTHOC_MERGED_EVAL}" == "1" && "${GEO_WEIGHT}" != "0" && "${GEO_WEIGHT}" != "0.0" ]]; then
   "${PYTHON_BIN}" data/watch_multidataset_eval.py \
     --mode merged \
     --checkpoint-dir "${CKPT_DIR}" \
     --output-jsonl "${MULTIDATASET_MERGED_JSONL}" \
-    --eval-gpu "${POSTHOC_MERGED_GPU}" \
+    --eval-gpu "${POSTHOC_MULTIDATASET_GPU}" \
     --batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}" \
     --workers "${MULTIDATASET_EVAL_WORKERS}" \
     --genecis-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}" \
@@ -263,6 +230,7 @@ if [[ "${RUN_POSTHOC_MERGED_EVAL}" == "1" && "${GEO_WEIGHT}" != "0" && "${GEO_WE
     --base-kind "${MULTIDATASET_MERGED_BASE_KIND}" \
     --geo-kind "${MULTIDATASET_MERGED_GEO_KIND}" \
     --merge-mode "${POSTHOC_MERGE_MODE}" \
+    --shared-a-num-layers "${SHARED_A_NUM_LAYERS}" \
     --min-step "${MULTIDATASET_EVAL_START_STEP}" \
     --merge-weight-a "${MERGE_RETRIEVAL_WEIGHT}" \
     --merge-weight-b "${MERGE_GEO_WEIGHT}" \
@@ -281,36 +249,33 @@ if [[ "${RUN_POSTHOC_MERGED_EVAL}" == "1" && "${GEO_WEIGHT}" != "0" && "${GEO_WE
   WATCHER_PIDS+=("$!")
 fi
 
-for pid in "${WATCHER_PIDS[@]:-}"; do
-  wait "${pid}"
-done
-
-if [[ "${RUN_POSTHOC_MERGED_ALT_EVAL}" == "1" && "${GEO_WEIGHT}" != "0" && "${GEO_WEIGHT}" != "0.0" ]]; then
-  "${PYTHON_BIN}" data/watch_multidataset_eval.py \
-    --mode merged \
+if [[ "${RUN_POSTHOC_CIRR_EVAL}" == "1" && "${GEO_WEIGHT}" != "0" && "${GEO_WEIGHT}" != "0.0" ]]; then
+  "${PYTHON_BIN}" data/watch_cirr_parallel_merge_eval.py \
     --checkpoint-dir "${CKPT_DIR}" \
-    --output-jsonl "${MULTIDATASET_MERGED_ALT_JSONL}" \
-    --eval-gpu "${POSTHOC_MERGED_GPU}" \
-    --batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}" \
-    --workers "${MULTIDATASET_EVAL_WORKERS}" \
-    --genecis-batch-size "${MULTIDATASET_EVAL_BATCH_SIZE}" \
-    --datasets "${MULTIDATASET_DATASETS}" \
-    --base-kind "${MULTIDATASET_MERGED_ALT_BASE_KIND}" \
-    --geo-kind "${MULTIDATASET_MERGED_ALT_GEO_KIND}" \
+    --output-jsonl "${CIRR_MERGED_JSONL}" \
+    --eval-gpu "${POSTHOC_CIRR_GPU}" \
+    --batch-size "${POSTHOC_CIRR_BATCH_SIZE}" \
+    --workers "${POSTHOC_CIRR_WORKERS}" \
+    --base-kind "${MULTIDATASET_MERGED_BASE_KIND}" \
+    --geo-kind "${MULTIDATASET_MERGED_GEO_KIND}" \
     --merge-mode "${POSTHOC_MERGE_MODE}" \
+    --shared-a-num-layers "${SHARED_A_NUM_LAYERS}" \
     --min-step "${MULTIDATASET_EVAL_START_STEP}" \
-    --merge-weight-a "${MERGE_RETRIEVAL_WEIGHT}" \
-    --merge-weight-b "${MERGE_GEO_WEIGHT}" \
-    --merge-density "${MERGE_DENSITY}" \
-    --merge-alpha-a 16 \
-    --merge-rank-a 64 \
-    --merge-alpha-b 16 \
-    --merge-rank-b 64 \
+    --retrieval-weight "${MERGE_RETRIEVAL_WEIGHT}" \
+    --geo-weight "${MERGE_GEO_WEIGHT}" \
+    --density "${MERGE_DENSITY}" \
+    --lora-alpha 16 \
+    --lora-rank 64 \
     --nice "${WATCHER_NICE}" \
     --cpu-affinity "${WATCHER_CPU_AFFINITY}" \
     --cpu-threads "${WATCHER_CPU_THREADS}" \
     --poll-interval 1 \
     --timeout "${POSTHOC_EVAL_TIMEOUT}" \
     --stop-on-final \
-    --once > "${MULTIDATASET_MERGED_ALT_LOG}" 2>&1
+    --once > "${CIRR_MERGED_LOG}" 2>&1 &
+  WATCHER_PIDS+=("$!")
 fi
+
+for pid in "${WATCHER_PIDS[@]:-}"; do
+  wait "${pid}"
+done

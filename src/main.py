@@ -32,6 +32,7 @@ import math
 import torch.nn as nn
 import copy
 import types
+import re
 
 
 def _safe_torch_load(path, map_location=None, weights_only=False):
@@ -229,7 +230,17 @@ def _tie_lora_a_parameters(retr_module: nn.Module, geo_module: nn.Module, prefix
         excluded_geo_names.add(f"{prefix}.A")
 
 
-def tie_shared_a_between_text_branches(clip_model: nn.Module, text_branch: nn.Module) -> set:
+_RESBLOCK_RE = re.compile(r"(^|\\.)resblocks\\.(\\d+)(\\.|$)")
+
+
+def _text_resblock_index(module_name: str):
+    match = _RESBLOCK_RE.search(module_name)
+    if match is None:
+        return None
+    return int(match.group(2))
+
+
+def tie_shared_a_between_text_branches(clip_model: nn.Module, text_branch: nn.Module, num_layers: int = 6) -> set:
     base = clip_model.module if hasattr(clip_model, "module") else clip_model
     branch = text_branch.module if hasattr(text_branch, "module") else text_branch
 
@@ -239,6 +250,9 @@ def tie_shared_a_between_text_branches(clip_model: nn.Module, text_branch: nn.Mo
     tied_count = 0
 
     for name, geo_module in geo_modules.items():
+        block_idx = _text_resblock_index(name)
+        if block_idx is not None and block_idx >= int(num_layers):
+            continue
         retr_module = retr_modules.get(name)
         if retr_module is None:
             continue
@@ -571,12 +585,17 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
             )
         freeze_module_except_lora(geo_text_model)
         if getattr(args, "shared_a_lora", False):
-            shared_a_geo_exclude_names = tie_shared_a_between_text_branches(model, geo_text_model)
+            shared_a_geo_exclude_names = tie_shared_a_between_text_branches(
+                model,
+                geo_text_model,
+                num_layers=int(getattr(args, "shared_a_num_layers", 6)),
+            )
             args.shared_a_param_names = sorted(shared_a_geo_exclude_names)
             if is_master(args):
                 logging.info(
                     f"✅ Enabled Shared-A LoRA on text encoder: tied {len(shared_a_geo_exclude_names)} geo A tensors "
-                    "to retrieval branch A tensors; geo optimizer will update only task-specific B."
+                    f"across shallow blocks [0, {int(getattr(args, 'shared_a_num_layers', 6)) - 1}]; "
+                    "geo optimizer will update only task-specific B."
                 )
                 if getattr(args, "shared_a_retrieval_only_update", False):
                     logging.info(
