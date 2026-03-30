@@ -51,3 +51,13 @@ common settings：Future FashionIQ/GeneCIS experiments only run `1000 step`.
 3. Logit scale experiment.
    - Turn off `reset logit scale`, keep the rest of the setup unchanged, and run one `1000 step` experiment.
    - Goal: test whether current logit scale is too small and limiting retrieval transfer to FashionIQ/GeneCIS.
+
+4. Layer-wise merge experiment from GC probe.
+   - Motivation: current GC probe suggests shallow text blocks have lower conflict, while deeper blocks have higher conflict.
+   - Proposed merge rule:
+     - layers `0-5`: simple weighted average / `B-sum`
+     - layers `6-11`: conservative merge such as `TIES`
+   - Simple A/B:
+     - A: all 12 layers use the same global merge rule
+     - B: layers `0-5` use average, layers `6-11` use `TIES`
+   - Goal: test whether conflict-aware layer-wise merge is better than one global merge rule.
