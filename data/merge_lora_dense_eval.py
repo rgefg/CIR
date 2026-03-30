@@ -121,6 +121,13 @@ def main() -> None:
     parser.add_argument("--weights", type=float, nargs=2, default=[0.5, 0.5], metavar=("WA", "WB"))
     parser.add_argument("--density", type=float, default=0.5)
     parser.add_argument("--majority-sign-method", type=str, default="total", choices=["total", "frequency"])
+    parser.add_argument(
+        "--merge-mode",
+        type=str,
+        default="delta_ties",
+        choices=["delta_ties", "shared_a_ties_b"],
+        help="Merge dense deltas directly, or under Shared-A assume A is tied and apply TIES only on effective B.",
+    )
     parser.add_argument("--text-only", action="store_true", default=False)
     parser.add_argument("--alpha-a", type=float, default=None)
     parser.add_argument("--rank-a", type=int, default=None)
@@ -184,14 +191,32 @@ def main() -> None:
     for p in valid_prefixes:
         pa = pair_a[p]
         pb = pair_b[p]
-        delta_a_eff = scale_a * (pa["B"].float() @ pa["A"].float())
-        delta_b_eff = scale_b * (pb["B"].float() @ pb["A"].float())
-        delta_m_eff = ties(
-            [delta_a_eff, delta_b_eff],
-            weights=w,
-            density=args.density,
-            majority_sign_method=args.majority_sign_method,
-        )
+        if args.merge_mode == "shared_a_ties_b":
+            a_ref = pb["A"].float()
+            if pa["A"].shape != pb["A"].shape:
+                raise RuntimeError(
+                    f"Shared-A B-TIES requires matching A shapes for {p}: {tuple(pa['A'].shape)} vs {tuple(pb['A'].shape)}"
+                )
+            if not torch.allclose(pa["A"].float(), pb["A"].float(), rtol=1e-4, atol=1e-5):
+                raise RuntimeError(f"Shared-A B-TIES requires equal A tensors for {p}, but they differ.")
+            b_a_eff = scale_a * pa["B"].float()
+            b_b_eff = scale_b * pb["B"].float()
+            b_m_eff = ties(
+                [b_a_eff, b_b_eff],
+                weights=w,
+                density=args.density,
+                majority_sign_method=args.majority_sign_method,
+            )
+            delta_m_eff = b_m_eff @ a_ref
+        else:
+            delta_a_eff = scale_a * (pa["B"].float() @ pa["A"].float())
+            delta_b_eff = scale_b * (pb["B"].float() @ pb["A"].float())
+            delta_m_eff = ties(
+                [delta_a_eff, delta_b_eff],
+                weights=w,
+                density=args.density,
+                majority_sign_method=args.majority_sign_method,
+            )
         _apply_dense_delta(out_sd, p, delta_m_eff, pb)
         replaced += 1
 
@@ -203,6 +228,7 @@ def main() -> None:
     print(f"valid_prefixes: {len(valid_prefixes)}")
     print(f"dropped_prefixes: {dropped}")
     print(f"replaced_dense_prefixes: {replaced}")
+    print(f"merge_mode: {args.merge_mode}")
     print(f"weights: {args.weights}, density: {args.density}, sign: {args.majority_sign_method}")
     print(f"scope: {'text_only' if args.text_only else 'default'}")
     print(f"output: {args.output}")
