@@ -230,7 +230,7 @@ def _tie_lora_a_parameters(retr_module: nn.Module, geo_module: nn.Module, prefix
         excluded_geo_names.add(f"{prefix}.A")
 
 
-_RESBLOCK_RE = re.compile(r"(^|\\.)resblocks\\.(\\d+)(\\.|$)")
+_RESBLOCK_RE = re.compile(r"(^|\.)resblocks\.(\d+)(\.|$)")
 
 
 def _text_resblock_index(module_name: str):

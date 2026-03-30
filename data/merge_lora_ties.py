@@ -41,7 +41,7 @@ def _norm_prefix(prefix: str) -> str:
    return _strip_module_prefix(prefix)
 
 
-_RESBLOCK_RE = re.compile(r"(^|\\.)resblocks\\.(\\d+)(\\.|$)")
+_RESBLOCK_RE = re.compile(r"(^|\.)resblocks\.(\d+)(\.|$)")
 
 
 def _text_resblock_index(prefix: str):
