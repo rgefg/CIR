@@ -539,6 +539,8 @@ def parse_args():
                         help="If > 0 and geo-sampling-mode is not all, keep only the top-k selected geo samples per batch.")
     parser.add_argument("--shared-a-lora", action="store_true", default=False,
                         help="Tie text LoRA A tensors between retrieval and geo branches, keeping only B task-specific.")
+    parser.add_argument("--shared-a-retrieval-only-update", action="store_true", default=False,
+                        help="When Shared-A LoRA is enabled, let geo branch use the shared A in forward but restore A gradients to retrieval-only values before stepping.")
     parser.add_argument("--conflict-probe", action="store_true", default=False,
                         help="Monitor same-batch retrieval/edit gradient conflict during training and export averaged statistics.")
     parser.add_argument("--conflict-probe-every", type=int, default=0,

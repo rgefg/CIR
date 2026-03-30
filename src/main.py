@@ -559,6 +559,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     freeze_clip_except_lora_and_logit_scale(model)
     geo_text_model = None
     shared_a_geo_exclude_names = set()
+    args.shared_a_param_names = []
     if float(getattr(args, "geo_weight", 0.0)) > 0.0:
         geo_text_model = TextEncoderBranch(model)
         if not getattr(args, "no_lora", False):
@@ -571,11 +572,17 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         freeze_module_except_lora(geo_text_model)
         if getattr(args, "shared_a_lora", False):
             shared_a_geo_exclude_names = tie_shared_a_between_text_branches(model, geo_text_model)
+            args.shared_a_param_names = sorted(shared_a_geo_exclude_names)
             if is_master(args):
                 logging.info(
                     f"✅ Enabled Shared-A LoRA on text encoder: tied {len(shared_a_geo_exclude_names)} geo A tensors "
                     "to retrieval branch A tensors; geo optimizer will update only task-specific B."
                 )
+                if getattr(args, "shared_a_retrieval_only_update", False):
+                    logging.info(
+                        "✅ Shared-A retrieval-only update is enabled: geo branch uses retrieval A in forward, "
+                        "but shared A gradients are restored to retrieval-only values before optimizer step."
+                    )
     
     # ============================================================
     # 🔒 Logit Scale 修复选项
