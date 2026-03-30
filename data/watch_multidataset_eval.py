@@ -47,6 +47,7 @@ def parse_args():
     parser.add_argument("--base-kind", choices=["raw", "ema"], default="raw")
     parser.add_argument("--geo-kind", choices=["raw", "ema"], default="ema")
     parser.add_argument("--merge-script", type=Path, default=DEFAULT_MERGE_SCRIPT)
+    parser.add_argument("--merge-mode", choices=["ties", "shared_a_sum_b"], default="ties")
     parser.add_argument("--merge-weight-a", type=float, default=0.5)
     parser.add_argument("--merge-weight-b", type=float, default=0.5)
     parser.add_argument("--merge-density", type=float, default=0.9)
@@ -169,6 +170,22 @@ def geo_counterpart(base_path: Path, base_meta: dict, geo_kind: str):
     return base_path.parent / f"epoch_{epoch}_step_{step}_geo_lora{suffix}.pt"
 
 
+def build_epoch_max_step_map(checkpoint_dir: Path, kind: str):
+    epoch_to_max_step = {}
+    for path in checkpoint_dir.glob("*.pt"):
+        if "_geo_lora" in path.name:
+            continue
+        meta = parse_base_tag(path, kind)
+        if meta is None or meta["step"] is None:
+            continue
+        epoch = meta["epoch"]
+        step = meta["step"]
+        prev = epoch_to_max_step.get(epoch)
+        if prev is None or step > prev:
+            epoch_to_max_step[epoch] = step
+    return epoch_to_max_step
+
+
 def build_eval_record(tag: str, step, mode: str, metrics: dict, extra: dict | None = None):
     record = {
         "tag": tag,
@@ -237,6 +254,10 @@ def main():
     processed = load_processed(args.output_jsonl)
 
     while True:
+        if args.mode == "standalone":
+            epoch_to_max_step = build_epoch_max_step_map(args.checkpoint_dir, args.checkpoint_kind)
+        else:
+            epoch_to_max_step = build_epoch_max_step_map(args.checkpoint_dir, args.base_kind)
         candidates = []
         for path in args.checkpoint_dir.glob("*.pt"):
             if args.mode == "standalone":
@@ -244,6 +265,8 @@ def main():
                     continue
                 meta = parse_base_tag(path, args.checkpoint_kind)
                 if meta is None:
+                    continue
+                if meta["is_final"] and epoch_to_max_step.get(meta["epoch"]) is not None:
                     continue
                 if meta["step"] is not None and meta["step"] < args.min_step:
                     continue
@@ -256,6 +279,8 @@ def main():
                     continue
                 meta = parse_base_tag(path, args.base_kind)
                 if meta is None:
+                    continue
+                if meta["is_final"] and epoch_to_max_step.get(meta["epoch"]) is not None:
                     continue
                 if meta["step"] is not None and meta["step"] < args.min_step:
                     continue
@@ -289,6 +314,8 @@ def main():
                     "--weights",
                     str(args.merge_weight_a),
                     str(args.merge_weight_b),
+                    "--merge-mode",
+                    str(args.merge_mode),
                     "--density",
                     str(args.merge_density),
                     "--text-only",

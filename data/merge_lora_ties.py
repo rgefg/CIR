@@ -99,6 +99,13 @@ def main() -> None:
    parser.add_argument("--weights", type=float, nargs=2, default=[0.5, 0.5], metavar=("WA", "WB"))
    parser.add_argument("--density", type=float, default=0.5)
    parser.add_argument("--majority-sign-method", type=str, default="total", choices=["total", "frequency"])
+   parser.add_argument(
+      "--merge-mode",
+      type=str,
+      default="ties",
+      choices=["ties", "shared_a_sum_b"],
+      help="Use TIES in delta space, or keep base A fixed and sum only B for Shared-A LoRA.",
+   )
    parser.add_argument("--text-only", action="store_true", default=False, help="Merge only text encoder LoRA pairs.")
    parser.add_argument("--all-lora", action="store_true", default=False, help="Merge both text and visual LoRA pairs.")
    parser.add_argument("--base", type=str, default="b", choices=["a", "b"], help="Output structure base checkpoint.")
@@ -172,6 +179,8 @@ def main() -> None:
    w = torch.tensor(args.weights, dtype=torch.float32)
    merged_AB: Dict[str, torch.Tensor] = {}
    copied_b_only_prefixes = 0
+   shared_a_mismatch_prefixes = 0
+   weight_a = float(args.weights[0])
    weight_b = float(args.weights[1])
    for p in valid_prefixes:
       aA = pair_a[p]["A"].float()
@@ -179,30 +188,51 @@ def main() -> None:
       bA = pair_b[p]["A"].float()
       bB = pair_b[p]["B"].float()
 
-      # Merge in effective delta space: delta_eff = (alpha/r) * (B@A)
-      delta_a_eff = scale_a * (aB @ aA)  # [out, in]
-      delta_b_eff = scale_b * (bB @ bA)  # [out, in]
-      delta_m_eff = ties(
-         [delta_a_eff, delta_b_eff],
-         weights=w,
-         density=args.density,
-         majority_sign_method=args.majority_sign_method,
-      )
-      # Convert back to unscaled LoRA delta expected by runtime base scaling.
-      delta_m = delta_m_eff / base_scale
-
-      rank_target = pair_b[p]["A"].shape[0] if args.base == "b" else pair_a[p]["A"].shape[0]
-      out_dtype = pair_b[p]["A"].dtype if args.base == "b" else pair_a[p]["A"].dtype
-      mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype)
-      # Write keys using base checkpoint naming convention.
-      if args.base == "b":
-         kA = pair_b[p].get("A_key", p + ".A")
-         kB = pair_b[p].get("B_key", p + ".B")
+      if args.merge_mode == "shared_a_sum_b":
+         if aA.shape != bA.shape:
+            raise RuntimeError(
+               f"Shared-A merge requires matching A shapes for {p}: {tuple(aA.shape)} vs {tuple(bA.shape)}"
+            )
+         if not torch.allclose(aA, bA, rtol=1e-4, atol=1e-5):
+            shared_a_mismatch_prefixes += 1
+         a_ref = aA if args.base == "a" else bA
+         coeff_a = weight_a * (scale_a / base_scale)
+         coeff_b = weight_b * (scale_b / base_scale)
+         merged_B = (coeff_a * aB) + (coeff_b * bB)
+         out_dtype = pair_b[p]["A"].dtype if args.base == "b" else pair_a[p]["A"].dtype
+         if args.base == "b":
+            kA = pair_b[p].get("A_key", p + ".A")
+            kB = pair_b[p].get("B_key", p + ".B")
+         else:
+            kA = pair_a[p].get("A_key", p + ".A")
+            kB = pair_a[p].get("B_key", p + ".B")
+         merged_AB[kA] = a_ref.to(dtype=out_dtype)
+         merged_AB[kB] = merged_B.to(dtype=out_dtype)
       else:
-         kA = pair_a[p].get("A_key", p + ".A")
-         kB = pair_a[p].get("B_key", p + ".B")
-      merged_AB[kA] = mA
-      merged_AB[kB] = mB
+         # Merge in effective delta space: delta_eff = (alpha/r) * (B@A)
+         delta_a_eff = scale_a * (aB @ aA)  # [out, in]
+         delta_b_eff = scale_b * (bB @ bA)  # [out, in]
+         delta_m_eff = ties(
+            [delta_a_eff, delta_b_eff],
+            weights=w,
+            density=args.density,
+            majority_sign_method=args.majority_sign_method,
+         )
+         # Convert back to unscaled LoRA delta expected by runtime base scaling.
+         delta_m = delta_m_eff / base_scale
+
+         rank_target = pair_b[p]["A"].shape[0] if args.base == "b" else pair_a[p]["A"].shape[0]
+         out_dtype = pair_b[p]["A"].dtype if args.base == "b" else pair_a[p]["A"].dtype
+         mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype)
+         # Write keys using base checkpoint naming convention.
+         if args.base == "b":
+            kA = pair_b[p].get("A_key", p + ".A")
+            kB = pair_b[p].get("B_key", p + ".B")
+         else:
+            kA = pair_a[p].get("A_key", p + ".A")
+            kB = pair_a[p].get("B_key", p + ".B")
+         merged_AB[kA] = mA
+         merged_AB[kB] = mB
 
    if args.include_b_only:
       for p in only_b:
@@ -211,15 +241,20 @@ def main() -> None:
             continue
          bA = pb["A"].float()
          bB = pb["B"].float()
-         delta_b_eff = scale_b * (bB @ bA)
-         delta_m = (weight_b * delta_b_eff) / base_scale
-         rank_target = pb["A"].shape[0]
          out_dtype = pb["A"].dtype
-         mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype)
          kA = pb.get("A_key", p + ".A")
          kB = pb.get("B_key", p + ".B")
-         merged_AB[kA] = mA
-         merged_AB[kB] = mB
+         if args.merge_mode == "shared_a_sum_b":
+            coeff_b = weight_b * (scale_b / base_scale)
+            merged_AB[kA] = pb["A"].to(dtype=out_dtype)
+            merged_AB[kB] = (coeff_b * bB).to(dtype=out_dtype)
+         else:
+            delta_b_eff = scale_b * (bB @ bA)
+            delta_m = (weight_b * delta_b_eff) / base_scale
+            rank_target = pb["A"].shape[0]
+            mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype)
+            merged_AB[kA] = mA
+            merged_AB[kB] = mB
          copied_b_only_prefixes += 1
 
    base_ckpt = ckpt_b if args.base == "b" else ckpt_a
@@ -269,6 +304,8 @@ def main() -> None:
    print(f"copied_b_only_prefixes: {copied_b_only_prefixes}")
    print(f"replaced_tensors(A+B): {replaced}")
    print(f"weights: {args.weights}, density: {args.density}, sign: {args.majority_sign_method}")
+   print(f"merge_mode: {args.merge_mode}")
+   print(f"shared_a_mismatch_prefixes: {shared_a_mismatch_prefixes}")
    print(f"scale_a(alpha/r): {scale_a}, scale_b(alpha/r): {scale_b}, base_scale: {base_scale}")
    print(f"scope: {'all_lora' if args.all_lora else ('text_only' if args.text_only else 'default')}")
    print(f"output: {args.output}")

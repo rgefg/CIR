@@ -185,6 +185,74 @@ def apply_lora_to_linear_layers(module: nn.Module, r: int, alpha: int, dropout: 
             apply_lora_to_linear_layers(child, r=r, alpha=alpha, dropout=dropout)
 
 
+def _tie_parameter(module: nn.Module, name: str, shared_param: nn.Parameter):
+    setattr(module, name, shared_param)
+
+
+def _tie_lora_a_parameters(retr_module: nn.Module, geo_module: nn.Module, prefix: str, excluded_geo_names: set):
+    if retr_module is None or geo_module is None:
+        return
+
+    if isinstance(retr_module, LoRAMultiheadAttention) and isinstance(geo_module, LoRAMultiheadAttention):
+        for proj_name in ["q_proj_lora", "k_proj_lora", "v_proj_lora"]:
+            retr_proj = getattr(retr_module, proj_name, None)
+            geo_proj = getattr(geo_module, proj_name, None)
+            if retr_proj is None or geo_proj is None or not hasattr(retr_proj, "A") or not hasattr(geo_proj, "A"):
+                continue
+            if retr_proj.A.shape != geo_proj.A.shape:
+                raise RuntimeError(
+                    f"Shared-A shape mismatch at {prefix}.{proj_name}: "
+                    f"{tuple(retr_proj.A.shape)} vs {tuple(geo_proj.A.shape)}"
+                )
+            _tie_parameter(geo_proj, "A", retr_proj.A)
+            excluded_geo_names.add(f"{prefix}.{proj_name}.A")
+
+        retr_out = getattr(retr_module, "out_proj", None)
+        geo_out = getattr(geo_module, "out_proj", None)
+        if _is_lora_linear(retr_out) and _is_lora_linear(geo_out):
+            if retr_out.A.shape != geo_out.A.shape:
+                raise RuntimeError(
+                    f"Shared-A shape mismatch at {prefix}.out_proj: "
+                    f"{tuple(retr_out.A.shape)} vs {tuple(geo_out.A.shape)}"
+                )
+            _tie_parameter(geo_out, "A", retr_out.A)
+            excluded_geo_names.add(f"{prefix}.out_proj.A")
+        return
+
+    if _is_lora_linear(retr_module) and _is_lora_linear(geo_module):
+        if retr_module.A.shape != geo_module.A.shape:
+            raise RuntimeError(
+                f"Shared-A shape mismatch at {prefix}: "
+                f"{tuple(retr_module.A.shape)} vs {tuple(geo_module.A.shape)}"
+            )
+        _tie_parameter(geo_module, "A", retr_module.A)
+        excluded_geo_names.add(f"{prefix}.A")
+
+
+def tie_shared_a_between_text_branches(clip_model: nn.Module, text_branch: nn.Module) -> set:
+    base = clip_model.module if hasattr(clip_model, "module") else clip_model
+    branch = text_branch.module if hasattr(text_branch, "module") else text_branch
+
+    retr_modules = dict(base.transformer.named_modules())
+    geo_modules = dict(branch.transformer.named_modules())
+    excluded_geo_names = set()
+    tied_count = 0
+
+    for name, geo_module in geo_modules.items():
+        retr_module = retr_modules.get(name)
+        if retr_module is None:
+            continue
+        before_count = len(excluded_geo_names)
+        prefix = f"transformer.{name}" if name else "transformer"
+        _tie_lora_a_parameters(retr_module, geo_module, prefix, excluded_geo_names)
+        if len(excluded_geo_names) > before_count:
+            tied_count += len(excluded_geo_names) - before_count
+
+    if tied_count == 0:
+        raise RuntimeError("Shared-A LoRA was enabled, but no text LoRA A tensors were tied.")
+    return excluded_geo_names
+
+
 def freeze_clip_except_lora_and_logit_scale(model: nn.Module):
     for n, p in model.named_parameters():
         p.requires_grad = False
@@ -490,6 +558,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     
     freeze_clip_except_lora_and_logit_scale(model)
     geo_text_model = None
+    shared_a_geo_exclude_names = set()
     if float(getattr(args, "geo_weight", 0.0)) > 0.0:
         geo_text_model = TextEncoderBranch(model)
         if not getattr(args, "no_lora", False):
@@ -500,6 +569,13 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                 dropout=getattr(args, "geo_lora_dropout", 0.0),
             )
         freeze_module_except_lora(geo_text_model)
+        if getattr(args, "shared_a_lora", False):
+            shared_a_geo_exclude_names = tie_shared_a_between_text_branches(model, geo_text_model)
+            if is_master(args):
+                logging.info(
+                    f"✅ Enabled Shared-A LoRA on text encoder: tied {len(shared_a_geo_exclude_names)} geo A tensors "
+                    "to retrieval branch A tensors; geo optimizer will update only task-specific B."
+                )
     
     # ============================================================
     # 🔒 Logit Scale 修复选项
@@ -711,9 +787,22 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     def include(n):
         return not exclude(n)
 
-    def build_param_groups(named_parameters, weight_decay):
-        gain_or_bias_params = [p for n, p in named_parameters if exclude(n) and p.requires_grad]
-        rest_params = [p for n, p in named_parameters if include(n) and p.requires_grad]
+    def build_param_groups(named_parameters, weight_decay, exclude_name_set=None):
+        exclude_name_set = set(exclude_name_set or [])
+        gain_or_bias_params = []
+        rest_params = []
+        seen = set()
+        for n, p in named_parameters:
+            norm_name = n[len("module."):] if n.startswith("module.") else n
+            if norm_name in exclude_name_set or (not p.requires_grad):
+                continue
+            if id(p) in seen:
+                continue
+            seen.add(id(p))
+            if exclude(norm_name):
+                gain_or_bias_params.append(p)
+            else:
+                rest_params.append(p)
         groups = []
         if gain_or_bias_params:
             groups.append({"params": gain_or_bias_params, "weight_decay": 0.0})
@@ -735,7 +824,11 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
         eps=args.eps,
     )
     geo_optimizer = None
-    geo_param_groups = build_param_groups(geo_named_parameters, args.geo_wd)
+    geo_param_groups = build_param_groups(
+        geo_named_parameters,
+        args.geo_wd,
+        exclude_name_set=shared_a_geo_exclude_names,
+    )
     if geo_param_groups:
         geo_optimizer = optim.AdamW(
             geo_param_groups,
