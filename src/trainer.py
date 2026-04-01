@@ -131,7 +131,7 @@ def _build_retrieval_prompt(instruction, placeholder, args):
     inst_str = _to_text(instruction).strip()
     if not inst_str:
         return f"a photo of {placeholder}"
-    return f"a photo of {placeholder} and {inst_str}"
+    return f"a photo of {placeholder} that {inst_str}"
 
 
 def _to_text(x):

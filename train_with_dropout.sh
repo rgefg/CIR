@@ -5,13 +5,13 @@ export PYTHONPATH="/data2/mingyu/composed_image_retrieval:/data2/mingyu/composed
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 PYTHON_BIN="${PYTHON_BIN:-/data2/mingyu/miniconda3/envs/torch/bin/python}"
 
-DIST_URL="${DIST_URL:-tcp://127.0.0.1:6163}"
-TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-6,7}}"
+DIST_URL="${DIST_URL:-tcp://127.0.0.1:6164}"
+TRAIN_CUDA_DEVICES="${TRAIN_CUDA_DEVICES:-${CUDA_VISIBLE_DEVICES:-0,1}}"
 IFS=',' read -r -a TRAIN_GPU_LIST <<< "${TRAIN_CUDA_DEVICES}"
 POSTHOC_CIRR_GPU="${POSTHOC_CIRR_GPU:-${TRAIN_GPU_LIST[0]}}"
 POSTHOC_MULTIDATASET_GPU="${POSTHOC_MULTIDATASET_GPU:-${TRAIN_GPU_LIST[0]}}"
 POSTHOC_SECOND_MULTIDATASET_GPU="${POSTHOC_SECOND_MULTIDATASET_GPU:-${TRAIN_GPU_LIST[1]:-${TRAIN_GPU_LIST[0]}}}"
-RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1000_Exp1Ref_NoDrop_FashionOnly_TiesVsHybrid}"
+RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1000_ThatAlign_FashionOnly_TiesVsHybrid}"
 
 TRAIN_JSON="${TRAIN_JSON:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2_with_reverse.jsonl}"
 REVERSE_JSON="${REVERSE_JSON:-}"
