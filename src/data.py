@@ -358,6 +358,7 @@ class CIRR(Dataset):
 
     def init_test(self, data):
         self.pairids = []
+        self.group_members = []
         if self.mode == 'caps':
             for d in data:
                 ref_path = d['reference']+ ".png"
@@ -365,16 +366,21 @@ class CIRR(Dataset):
                 self.target_caps.append(d['caption']) 
                 self.pairids.append(d['pairid'])
                 self.target_imgs.append('dummy')
+                members = [m + ".png" for m in d['img_set']['members']]
+                self.group_members.append(members)
         else:
             self.target_imgs = [key + ".png" for key in data.keys()]
 
     def init_val(self, data):
+        self.group_members = []
         for d in data:
             ref_path = d['reference']+ ".png"
             tar_path = d['target_hard']+ ".png"
             self.ref_imgs.append(ref_path)
             self.target_imgs.append(tar_path)
-            self.target_caps.append(d['caption'])            
+            self.target_caps.append(d['caption'])
+            members = [m + ".png" for m in d['img_set']['members']]
+            self.group_members.append(members)            
     
     def return_testdata(self, idx):
         if self.mode == 'caps':
@@ -387,7 +393,8 @@ class CIRR(Dataset):
                 text_with_blank = tokenize(text_with_blank_raw)[0]                 
                 return ref_images, text_with_blank, \
                     caption_only, str(self.ref_imgs[idx]), \
-                        self.pairids[idx], text_with_blank_raw
+                        self.pairids[idx], text_with_blank_raw, \
+                        self.group_members[idx]
         else:
             tar_path = str(self.target_imgs[idx])
             img_path = Image.open(os.path.join(self.root_img, tar_path))
@@ -405,7 +412,7 @@ class CIRR(Dataset):
             ref_text_tokens = tokenize(text_with_blank)[0]                 
             return ref_images, ref_text_tokens, caption_only, \
                 str(self.ref_imgs[idx]), str(self.target_imgs[idx]), \
-                    target_cap                       
+                    target_cap, self.group_members[idx]
         else:
             tar_path = str(self.target_imgs[idx])
             img_path = os.path.join(self.root_img, tar_path)
@@ -427,9 +434,11 @@ class CIRR(Dataset):
 ## image split ./image_splits/split.{cloth_type}.val.json, cloth_type in [toptee, shirt, dress]
 class FashionIQ(Dataset):
     def __init__(self, cloth, transforms, is_train=False, vis_mode=False, \
-        mode='caps', is_return_target_path=False, root='./data'):
+        mode='caps', is_return_target_path=False, root='./data',
+        image_root=None, image_ext=".png"):
         root_iq = os.path.join(root, 'fashion-iq')
-        self.root_img = os.path.join(root_iq, 'images')
+        self.root_img = image_root or os.path.join(root_iq, 'images')
+        self.image_ext = image_ext if str(image_ext).startswith('.') else f".{image_ext}"
         self.vis_mode = vis_mode
         self.mode = mode
         self.is_return_target_path = is_return_target_path
@@ -455,13 +464,13 @@ class FashionIQ(Dataset):
 
     def init_imgs(self):
         data = json.load(open(self.json_file, "r"))
-        self.target_imgs = [key + ".png" for key in data]        
+        self.target_imgs = [key + self.image_ext for key in data]
 
     def init_data(self):
         def load_data(data):
             for d in data:
-                ref_path = os.path.join(self.root_img, d['candidate']+ ".png") 
-                tar_path = os.path.join(self.root_img, d['target']+ ".png")            
+                ref_path = os.path.join(self.root_img, d['candidate'] + self.image_ext)
+                tar_path = os.path.join(self.root_img, d['target'] + self.image_ext)
                 try:
                     Image.open(ref_path)
                     Image.open(tar_path)

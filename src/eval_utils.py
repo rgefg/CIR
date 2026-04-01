@@ -34,7 +34,7 @@ import pickle
 from utils import is_master
 
 
-def build_bidirectional_fashion_prompts(relative_captions, prompt_template="a photo of * and {first} and {second}"):
+def build_bidirectional_fashion_prompts(relative_captions, prompt_template="a photo of * that {first} and {second}"):
     arr = np.array(relative_captions, dtype=object)
     if arr.ndim == 2 and arr.shape[0] == 2:
         caption_pairs = arr.T.tolist()
@@ -51,6 +51,16 @@ def build_bidirectional_fashion_prompts(relative_captions, prompt_template="a ph
         prompts.append(prompt_template.format(first=cap1, second=cap2))
         prompts_reversed.append(prompt_template.format(first=cap2, second=cap1))
     return prompts, prompts_reversed
+
+
+def mix_fashion_eval_features(composed_features, caption_features, composed_weight=0.5):
+    composed_weight = float(composed_weight)
+    text_weight = 1.0 - composed_weight
+    return F.normalize(
+        composed_weight * F.normalize(composed_features, dim=-1)
+        + text_weight * F.normalize(caption_features, dim=-1),
+        dim=-1,
+    )
 
 def prepare_img(img_file, transform):
     return transform(Image.open(img_file))
@@ -332,8 +342,9 @@ def evaluate_cirr(model, img2text, args, query_loader, target_loader):
             for path in target_paths:
                 all_target_paths.append(path)
 
+        all_group_members = []
         for batch in tqdm(query_loader):
-            ref_images, text_with_blank, caption_only, ref_paths, answer_paths, raw_captions = batch
+            ref_images, text_with_blank, caption_only, ref_paths, answer_paths, raw_captions, group_members = batch
             if args.gpu is not None:
                 ref_images = ref_images.cuda(args.gpu, non_blocking=True)
                 text_with_blank = text_with_blank.cuda(args.gpu, non_blocking=True)
@@ -345,6 +356,9 @@ def evaluate_cirr(model, img2text, args, query_loader, target_loader):
                 all_answer_paths.append(path)
             for cap in raw_captions:
                 all_raw_captions.append(cap)
+            # group_members from DataLoader: tuple of N_members lists, each of batch_size strings
+            gm = np.array(group_members).T.tolist()  # -> [batch_size, N_members]
+            all_group_members.extend(gm)
 
             caption_features = m.encode_text(caption_only)
             ## Composed features
@@ -367,24 +381,23 @@ def evaluate_cirr(model, img2text, args, query_loader, target_loader):
         all_ref_paths = np.array(all_ref_paths)
         all_answer_paths = np.array(all_answer_paths)
         
-        # ====== 在这里加：统一三组名字格式 ======
-        import os
         def _norm_name(x):
-            x = os.path.basename(str(x))   # 去掉路径
+            x = os.path.basename(str(x))
             if not x.endswith(".png"):
-                x = x + ".png"             # 统一后缀
+                x = x + ".png"
             return x
 
         all_target_paths = np.array([_norm_name(x) for x in all_target_paths])
         all_ref_paths    = np.array([_norm_name(x) for x in all_ref_paths])
         all_answer_paths = np.array([_norm_name(x) for x in all_answer_paths])
-        # ====== 加到这里结束 ======
+        all_group_members = [[_norm_name(m) for m in members] for members in all_group_members]
         
         metric_func = partial(get_metrics_cirr, 
                 image_features=torch.cat(all_image_features), 
                 reference_names=all_ref_paths, 
                 index_names=all_target_paths, 
-                target_names=all_answer_paths)
+                target_names=all_answer_paths,
+                group_members=all_group_members)
 
         feats = {'composed': torch.cat(all_composed_features), 
                  'image': torch.cat(all_query_image_features),
@@ -410,13 +423,12 @@ def evaluate_cirr_test(model, img2text, args, query_loader, target_loader):
     all_image_features = []  
     all_query_image_features = []  
     all_composed_features = []  
-    all_composed_plus_image_features = []  
     all_mixture_features = []  
     all_caption_features = []  
     all_ref_paths = []
     all_target_paths = []
-    all_answer_paths = []
     all_ids = []
+    all_group_members = []
 
     m = model.module if args.distributed or args.dp else model   
     logit_scale = m.logit_scale.exp()
@@ -434,7 +446,7 @@ def evaluate_cirr_test(model, img2text, args, query_loader, target_loader):
                 all_target_paths.append(path)
 
         for batch in tqdm(query_loader):
-            ref_images, text_with_blank, caption_only, ref_paths, pairids, text_with_blank_raw = batch
+            ref_images, text_with_blank, caption_only, ref_paths, pairids, text_with_blank_raw, group_members = batch
             if args.gpu is not None:
                 ref_images = ref_images.cuda(args.gpu, non_blocking=True)
                 text_with_blank = text_with_blank.cuda(args.gpu, non_blocking=True)
@@ -444,6 +456,8 @@ def evaluate_cirr_test(model, img2text, args, query_loader, target_loader):
                 all_ids.append(ids)
             for path in ref_paths:
                 all_ref_paths.append(path)
+            gm = np.array(group_members).T.tolist()
+            all_group_members.extend(gm)
 
             caption_features = m.encode_text(caption_only)
             query_image_features = m.encode_image(ref_images)
@@ -467,13 +481,13 @@ def evaluate_cirr_test(model, img2text, args, query_loader, target_loader):
 
         all_target_paths = np.array(all_target_paths)
         all_ref_paths = np.array(all_ref_paths)
-        all_answer_paths = np.array(all_answer_paths)
         res_all = {}
         metrics_func = partial(get_cirr_testoutput, 
                                image_features=torch.cat(all_image_features),
                                reference_names=all_ref_paths,
                                index_names=all_target_paths,
-                               id_names=all_ids)
+                               id_names=all_ids,
+                               group_members=all_group_members)
         feats = {'composed': torch.cat(all_composed_features), 
                  'image': torch.cat(all_query_image_features),
                  'text': torch.cat(all_caption_features),
@@ -493,6 +507,7 @@ def evaluate_fashion(model, img2text, args, source_loader, target_loader):
     all_image_features = []  
     all_query_image_features = []  
     all_composed_features = []  
+    all_composed_raw_features = []
     all_caption_features = []  
     all_mixture_features = []  
     all_reference_names = []
@@ -548,20 +563,27 @@ def evaluate_fashion(model, img2text, args, source_loader, target_loader):
             query_image_features = query_image_features / query_image_features.norm(dim=-1, keepdim=True)
             mixture_features = query_image_features + caption_features
             mixture_features = mixture_features / mixture_features.norm(dim=-1, keepdim=True)
-            composed_feature = F.normalize(
+            composed_feature_raw = F.normalize(
                 (F.normalize(composed_feature_forward, dim=-1) + F.normalize(composed_feature_reversed, dim=-1)) / 2,
                 dim=-1,
+            )
+            composed_feature = mix_fashion_eval_features(
+                composed_feature_raw,
+                caption_features,
+                composed_weight=getattr(args, "fashion_eval_composed_text_weight", 0.5),
             )
 
             all_caption_features.append(caption_features)
             all_query_image_features.append(query_image_features)
             all_composed_features.append(composed_feature)
+            all_composed_raw_features.append(composed_feature_raw)
             all_mixture_features.append(mixture_features)
 
         metric_func = partial(get_metrics_fashion, 
                               image_features=torch.cat(all_image_features),
                               target_names=all_target_paths, answer_names=all_answer_paths)
-        feats = {'composed': torch.cat(all_composed_features), 
+        feats = {'composed': torch.cat(all_composed_features),
+                 'composed_raw': torch.cat(all_composed_raw_features),
                  'image': torch.cat(all_query_image_features),
                  'text': torch.cat(all_caption_features),
                  'mixture': torch.cat(all_mixture_features)}
@@ -607,76 +629,76 @@ def get_metrics_fashion(image_features, ref_features, target_names, answer_names
     return metrics
 
 
-def get_metrics_cirr(image_features, ref_features, reference_names, index_names, target_names):
-    metrics = {}
+def get_metrics_cirr(image_features, ref_features, reference_names, index_names, target_names, group_members=None):
     metrics = {}
 
-    # ====== 加在这里 (开始) ======
-    import os
-    def _norm_name(x):
-        x = os.path.basename(str(x))
-        if not x.endswith(".png"):
-            x = x + ".png"
-        return x
-
-    reference_names = [_norm_name(x) for x in reference_names]
-    target_names    = [_norm_name(x) for x in target_names]
-    index_names     = [_norm_name(x) for x in index_names]
-    # distances: [num_queries, num_gallery]
     distances = 1 - ref_features @ image_features.T
-    sorted_indices = torch.argsort(distances, dim=-1).cpu()  # [num_queries, num_gallery]
-    sorted_index_names = np.array(index_names)[sorted_indices]  # [num_queries, num_gallery]
+    sorted_indices = torch.argsort(distances, dim=-1).cpu()
+    sorted_index_names = np.array(index_names)[sorted_indices]
 
-    # Delete the reference image from the results
     num_q = sorted_index_names.shape[0]
     num_g = len(index_names)
 
-    # build a [num_queries, num_gallery] array of reference names
     ref_mat = np.repeat(np.array(reference_names), num_g).reshape(num_q, num_g)
-
-    reference_mask = torch.tensor(sorted_index_names != ref_mat)  # True means keep
-    flat = sorted_index_names[reference_mask]                     # 1D flattened kept elements
-
-    # infer remaining gallery size after removing reference(s)
+    reference_mask = torch.tensor(sorted_index_names != ref_mat)
+    flat = sorted_index_names[reference_mask]
     num_g_kept = flat.size // num_q
-    sorted_index_names = flat.reshape(num_q, num_g_kept)          # [num_queries, num_g_kept]
+    sorted_index_names = flat.reshape(num_q, num_g_kept)
 
-    # Compute the ground-truth labels wrt the predictions
     tgt_mat = np.repeat(np.array(target_names), num_g_kept).reshape(num_q, num_g_kept)
-    labels = torch.tensor(sorted_index_names == tgt_mat)          # [num_queries, num_g_kept]
+    labels = torch.tensor(sorted_index_names == tgt_mat)
 
-    # each query should have exactly one true target in gallery
     assert torch.equal(
         torch.sum(labels, dim=-1).int(),
         torch.ones(num_q).int()
     ), "Some queries do not have exactly one matching target in gallery."
 
     for k in [1, 5, 10, 50, 100]:
-        k_eff = min(k, num_g_kept)  # avoid k > gallery
-        metrics[f"recall_R@{k}"] = (torch.sum(labels[:, :k_eff]) / num_q).item() * 100
+        k_eff = min(k, num_g_kept)
+        metrics[f"R@{k}"] = (torch.sum(labels[:, :k_eff]) / num_q).item() * 100
+
+    # R_subset@K: recall within subset members only
+    if group_members is not None:
+        group_members_arr = np.array(group_members)  # [num_q, N_members]
+        group_mask = (sorted_index_names[..., None] == group_members_arr[:, None, :]).sum(-1).astype(bool)
+        sorted_group_names = sorted_index_names[group_mask].reshape(num_q, -1)
+
+        tgt_arr = np.array(target_names)
+        for k in [1, 2, 3]:
+            k_eff = min(k, sorted_group_names.shape[1])
+            hits = (sorted_group_names[:, :k_eff] == tgt_arr[:, None]).any(axis=1)
+            metrics[f"R_subset@{k}"] = float(hits.sum()) / num_q * 100
 
     return metrics
 
 
 
-def get_cirr_testoutput(image_features, ref_features, reference_names, index_names, id_names):
-    metrics = {}
+def get_cirr_testoutput(image_features, ref_features, reference_names, index_names, id_names, group_members=None):
     distances = 1 - ref_features @ image_features.T
     sorted_indices = torch.argsort(distances, dim=-1).cpu()
     sorted_index_names = np.array(index_names)[sorted_indices]
 
-    # Delete the reference image from the results
     reference_mask = torch.tensor(
         sorted_index_names != np.repeat(np.array(reference_names), len(index_names)).reshape(len(sorted_index_names), -1))
     sorted_index_names = sorted_index_names[reference_mask].reshape(sorted_index_names.shape[0],
                                                                     sorted_index_names.shape[1] - 1)
+    # Full-gallery recall dict
     result_dict = {"version": "rc2", "metric": "recall"}
     for ind in range(len(id_names)):
         pairid = str(id_names[ind].item())
-        result_dict[pairid] = []
-        for t in range(50):
-            result_dict[pairid].append(sorted_index_names[ind][t].replace(".png", ""))
-    return result_dict
+        result_dict[pairid] = [sorted_index_names[ind][t].replace(".png", "") for t in range(50)]
+
+    # Subset recall dict
+    subset_dict = {"version": "rc2", "metric": "recall_subset"}
+    if group_members is not None:
+        group_members_arr = np.array(group_members)  # [num_q, N_members]
+        group_mask = (sorted_index_names[..., None] == group_members_arr[:, None, :]).sum(-1).astype(bool)
+        sorted_group_names = sorted_index_names[group_mask].reshape(sorted_index_names.shape[0], -1)
+        for ind in range(len(id_names)):
+            pairid = str(id_names[ind].item())
+            subset_dict[pairid] = [sorted_group_names[ind][t].replace(".png", "") for t in range(min(3, sorted_group_names.shape[1]))]
+
+    return {"recall": result_dict, "recall_subset": subset_dict}
 
 
 def get_metrics_imgnet(query_features, image_features, query_labels, target_labels):

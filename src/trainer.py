@@ -131,6 +131,9 @@ def _build_retrieval_prompt(instruction, placeholder, args):
     inst_str = _to_text(instruction).strip()
     if not inst_str:
         return f"a photo of {placeholder}"
+    connector = getattr(args, "retrieval_prompt_connector", "that")
+    if connector == "and":
+        return f"a photo of {placeholder} and {inst_str}"
     return f"a photo of {placeholder} that {inst_str}"
 
 

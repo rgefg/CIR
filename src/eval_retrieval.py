@@ -163,9 +163,8 @@ def load_model(args):
         if args.gpu is None:
             checkpoint = _safe_torch_load(args.resume)
         else:
-            # Map model to be loaded to specified single gpu.
-            loc = "cuda:{}".format(args.gpu)
-            checkpoint = _safe_torch_load(args.resume, map_location=loc, weights_only=False)
+            # Load to CPU first to avoid OOM from optimizer states in large checkpoints.
+            checkpoint = _safe_torch_load(args.resume, map_location="cpu", weights_only=False)
             print("Checkpoint top-level keys:", checkpoint.keys())
             for k in checkpoint.keys():
                 if "state_dict" in k:
@@ -330,24 +329,33 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                                      args,
                                      source_dataloader,
                                      target_dataloader)
-        # Create output directory if not exists
         output_dir = getattr(args, 'cirr_output_dir', 'res_cirr')
         os.makedirs(output_dir, exist_ok=True)
-        for key, value in results.items():
-            with open(os.path.join(output_dir, key + '.json'), 'w') as f:
-                json.dump(value, f)
-        logging.info(f"CIRR test results saved to {output_dir}/")
+        for feat_key, feat_results in results.items():
+            # feat_results = {"recall": {...}, "recall_subset": {...}}
+            recall_dict = feat_results.get("recall", feat_results)
+            subset_dict = feat_results.get("recall_subset", None)
+            with open(os.path.join(output_dir, feat_key + '.json'), 'w') as f:
+                json.dump(recall_dict, f, sort_keys=True)
+            if subset_dict and len(subset_dict) > 2:
+                with open(os.path.join(output_dir, 'subset_' + feat_key + '.json'), 'w') as f:
+                    json.dump(subset_dict, f, sort_keys=True)
+        logging.info(f"CIRR test results (recall + subset) saved to {output_dir}/")
     
     elif args.eval_mode == 'fashion':
         assert args.source_data in ['dress', 'shirt', 'toptee']
         source_dataset = FashionIQ(cloth=args.source_data, 
                                    transforms=preprocess_val, 
                                    root=root_project, 
-                                   is_return_target_path=True)
+                                   is_return_target_path=True,
+                                   image_root=args.fashioniq_image_root,
+                                   image_ext=args.fashioniq_image_ext)
         target_dataset = FashionIQ(cloth=args.source_data, 
                                    transforms=preprocess_val, 
                                    root=root_project, 
-                                   mode='imgs')
+                                   mode='imgs',
+                                   image_root=args.fashioniq_image_root,
+                                   image_ext=args.fashioniq_image_ext)
         source_dataloader = DataLoader(
             source_dataset,
             batch_size=args.batch_size,
