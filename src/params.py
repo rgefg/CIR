@@ -92,6 +92,18 @@ def parse_args():
         help="Padding augmentation proposed by combiner.",
     )
     parser.add_argument(
+        "--fashioniq-image-root",
+        type=str,
+        default=None,
+        help="Optional override for FashionIQ image directory.",
+    )
+    parser.add_argument(
+        "--fashioniq-image-ext",
+        type=str,
+        default=".png",
+        help="FashionIQ image filename extension, e.g. .png or .jpg.",
+    )
+    parser.add_argument(
         "--query_file",
         type=str,
         default=None,
