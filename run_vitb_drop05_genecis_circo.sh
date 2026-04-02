@@ -17,7 +17,7 @@ MODEL_NAME="ViT-B/32" \
 OPENAI_PRETRAINED="1" \
 PIC2WORD_CKPT="" \
 RETRIEVAL_PROMPT_CONNECTOR="and" \
-TRAIN_CUDA_DEVICES="6,7" \
+TRAIN_CUDA_DEVICES="4,5" \
 DIST_URL="tcp://127.0.0.1:6170" \
 RUN_NAME="${RUN_NAME}" \
 INSTRUCTION_DROPOUT_PROB="0.5" \
@@ -51,7 +51,7 @@ for STEP in 600 800 1000 1200 1400; do
     --alpha-a 16 --rank-a 64 \
     --alpha-b 16 --rank-b 64
 
-  CUDA_VISIBLE_DEVICES=6 "${PYTHON_BIN}" "${ROOT}/data/eval_multidataset_suite.py" \
+  CUDA_VISIBLE_DEVICES=4 "${PYTHON_BIN}" "${ROOT}/data/eval_multidataset_suite.py" \
     --resume "${MERGED_CKPT}" \
     --output-json "${OUT_JSON}" \
     --gpu 0 \
@@ -91,7 +91,7 @@ mkdir -p "${LOG_DIR}/circo_final_step1400"
   --alpha-a 16 --rank-a 64 \
   --alpha-b 16 --rank-b 64
 
-CUDA_VISIBLE_DEVICES=7 "${PYTHON_BIN}" "${ROOT}/src/eval_retrieval.py" \
+CUDA_VISIBLE_DEVICES=5 "${PYTHON_BIN}" "${ROOT}/src/eval_retrieval.py" \
   --resume "${FINAL_MERGED}" \
   --openai-pretrained \
   --model "ViT-B/32" \
