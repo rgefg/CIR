@@ -104,12 +104,6 @@ def parse_args():
         help="FashionIQ image filename extension, e.g. .png or .jpg.",
     )
     parser.add_argument(
-        "--fashion-eval-composed-text-weight",
-        type=float,
-        default=0.5,
-        help="Weight for composed features in FashionIQ eval-time fusion: normalize(w * composed + (1-w) * text).",
-    )
-    parser.add_argument(
         "--retrieval-prompt-connector",
         type=str,
         choices=["that", "and"],

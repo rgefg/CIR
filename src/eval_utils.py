@@ -53,15 +53,6 @@ def build_bidirectional_fashion_prompts(relative_captions, prompt_template="a ph
     return prompts, prompts_reversed
 
 
-def mix_fashion_eval_features(composed_features, caption_features, composed_weight=0.5):
-    composed_weight = float(composed_weight)
-    text_weight = 1.0 - composed_weight
-    return F.normalize(
-        composed_weight * F.normalize(composed_features, dim=-1)
-        + text_weight * F.normalize(caption_features, dim=-1),
-        dim=-1,
-    )
-
 def prepare_img(img_file, transform):
     return transform(Image.open(img_file))
 
@@ -507,7 +498,6 @@ def evaluate_fashion(model, img2text, args, source_loader, target_loader):
     all_image_features = []  
     all_query_image_features = []  
     all_composed_features = []  
-    all_composed_raw_features = []
     all_caption_features = []  
     all_mixture_features = []  
     all_reference_names = []
@@ -567,23 +557,17 @@ def evaluate_fashion(model, img2text, args, source_loader, target_loader):
                 (F.normalize(composed_feature_forward, dim=-1) + F.normalize(composed_feature_reversed, dim=-1)) / 2,
                 dim=-1,
             )
-            composed_feature = mix_fashion_eval_features(
-                composed_feature_raw,
-                caption_features,
-                composed_weight=getattr(args, "fashion_eval_composed_text_weight", 0.5),
-            )
+            composed_feature = composed_feature_raw
 
             all_caption_features.append(caption_features)
             all_query_image_features.append(query_image_features)
             all_composed_features.append(composed_feature)
-            all_composed_raw_features.append(composed_feature_raw)
             all_mixture_features.append(mixture_features)
 
         metric_func = partial(get_metrics_fashion, 
                               image_features=torch.cat(all_image_features),
                               target_names=all_target_paths, answer_names=all_answer_paths)
         feats = {'composed': torch.cat(all_composed_features),
-                 'composed_raw': torch.cat(all_composed_raw_features),
                  'image': torch.cat(all_query_image_features),
                  'text': torch.cat(all_caption_features),
                  'mixture': torch.cat(all_mixture_features)}

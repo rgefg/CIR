@@ -20,7 +20,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from eval_retrieval import load_model  # noqa: E402
-from eval_utils import build_bidirectional_fashion_prompts, get_metrics_fashion, mix_fashion_eval_features  # noqa: E402
+from eval_utils import build_bidirectional_fashion_prompts, get_metrics_fashion  # noqa: E402
 from data import CIRCODataset, CustomFolder, FashionIQ, GeneCISDataset  # noqa: E402
 from third_party.open_clip.clip import tokenize  # noqa: E402
 
@@ -37,7 +37,6 @@ def parse_args():
     parser.add_argument("--name", type=str, default="multidataset_eval")
     parser.add_argument("--logs", type=str, default=str(REPO_ROOT / "logs"))
     parser.add_argument("--datasets", type=str, default="fashioniq,circo,genecis")
-    parser.add_argument("--fashion-eval-composed-text-weight", type=float, default=0.5)
     return parser.parse_args()
 
 
@@ -71,7 +70,7 @@ def normalize(x):
     return x / x.norm(dim=-1, keepdim=True)
 
 
-def eval_fashion_composed(model, img2text, preprocess, gpu, batch_size, workers, composed_weight):
+def eval_fashion_composed(model, img2text, preprocess, gpu, batch_size, workers):
     root_project = REPO_ROOT / "data"
     m = unwrap_model(model)
     id_split = tokenize(["*"])[0][1]
@@ -124,11 +123,6 @@ def eval_fashion_composed(model, img2text, preprocess, gpu, batch_size, workers,
                 input_captions, input_captions_reversed = build_bidirectional_fashion_prompts(captions)
                 tokenized_input_captions = tokenize(input_captions).cuda(gpu, non_blocking=True)
                 tokenized_input_captions_reversed = tokenize(input_captions_reversed).cuda(gpu, non_blocking=True)
-                caption_features_forward = m.encode_text(tokenized_input_captions)
-                caption_features_reversed = m.encode_text(tokenized_input_captions_reversed)
-                caption_features = normalize(
-                    (normalize(caption_features_forward) + normalize(caption_features_reversed)) / 2
-                )
                 query_image_features = m.encode_image(ref_images)
                 query_image_tokens = img2text(query_image_features)
                 composed_feature_forward = m.encode_text_img_retrieval(
@@ -145,11 +139,6 @@ def eval_fashion_composed(model, img2text, preprocess, gpu, batch_size, workers,
                 )
                 composed_feature = normalize(
                     (normalize(composed_feature_forward) + normalize(composed_feature_reversed)) / 2
-                )
-                composed_feature = mix_fashion_eval_features(
-                    composed_feature,
-                    caption_features,
-                    composed_weight=composed_weight,
                 )
                 all_composed_features.append(composed_feature.cpu())
                 all_answer_paths.extend(answer_paths)
@@ -369,7 +358,6 @@ def main():
             cli_args.gpu,
             cli_args.batch_size,
             cli_args.workers,
-            cli_args.fashion_eval_composed_text_weight,
         )
     if "circo" in selected:
         result["circo_val"] = eval_circo_val(
