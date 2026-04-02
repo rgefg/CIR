@@ -21,7 +21,7 @@ REVERSE_JSON="${REVERSE_JSON:-}"
 if [[ -z "${WDS_SHARDS:-}" ]]; then
   WDS_SHARDS="/data2/mingyu/composed_image_retrieval/data/wds_cache/cc3m-train-{0000..0575}.tar"
 fi
-PIC2WORD_CKPT="${PIC2WORD_CKPT:-/data2/mingyu/composed_image_retrieval/checkpoint/pic2word_model.pt}"
+PIC2WORD_CKPT="${PIC2WORD_CKPT-/data2/mingyu/composed_image_retrieval/checkpoint/pic2word_model.pt}"
 
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-56}"
 TRAIN_ACCUM_STEPS="${TRAIN_ACCUM_STEPS:-8}"
