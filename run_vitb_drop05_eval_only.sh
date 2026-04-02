@@ -10,25 +10,8 @@ LOG_DIR="${ROOT}/logs/${RUN_NAME}"
 CKPT_DIR="${LOG_DIR}/checkpoints"
 GENECIS_JSONL="${LOG_DIR}/genecis_merged.jsonl"
 FINAL_MERGED="/tmp/${RUN_NAME}_step1400_merged.pt"
-
-rm -rf "${LOG_DIR}"
-
-MODEL_NAME="ViT-B/16" \
-RETRIEVAL_PROMPT_CONNECTOR="and" \
-TRAIN_CUDA_DEVICES="6,7" \
-DIST_URL="tcp://127.0.0.1:6170" \
-RUN_NAME="${RUN_NAME}" \
-INSTRUCTION_DROPOUT_PROB="0.5" \
-TRAIN_EPOCH_STEPS="1400" \
-SAVE_STEP_START="600" \
-SAVE_STEP_END="1400" \
-SAVE_STEP_INTERVAL="200" \
-RUN_POSTHOC_MERGED_EVAL="0" \
-RUN_POSTHOC_SECOND_MERGED_EVAL="0" \
-RUN_POSTHOC_CIRR_EVAL="0" \
-MULTIDATASET_EVAL_EVERY="0" \
-CIRR_VAL_EVAL_EVERY="0" \
-bash "${ROOT}/train_with_dropout.sh"
+GENECIS_GPU="${GENECIS_GPU:-4}"
+CIRCO_GPU="${CIRCO_GPU:-5}"
 
 : > "${GENECIS_JSONL}"
 
@@ -49,7 +32,7 @@ for STEP in 600 800 1000 1200 1400; do
     --alpha-a 16 --rank-a 64 \
     --alpha-b 16 --rank-b 64
 
-  CUDA_VISIBLE_DEVICES=6 "${PYTHON_BIN}" "${ROOT}/data/eval_multidataset_suite.py" \
+  CUDA_VISIBLE_DEVICES="${GENECIS_GPU}" "${PYTHON_BIN}" "${ROOT}/data/eval_multidataset_suite.py" \
     --resume "${MERGED_CKPT}" \
     --output-json "${OUT_JSON}" \
     --gpu 0 \
@@ -77,7 +60,6 @@ PY
   rm -f "${OUT_JSON}"
 done
 
-mkdir -p "${LOG_DIR}/circo_final_step1400"
 "${PYTHON_BIN}" "${ROOT}/data/merge_lora_ties.py" \
   --ckpt-a "${CKPT_DIR}/epoch_0_step_1400.pt" \
   --ckpt-b "${CKPT_DIR}/epoch_0_step_1400_geo_lora_ema.pt" \
@@ -89,7 +71,8 @@ mkdir -p "${LOG_DIR}/circo_final_step1400"
   --alpha-a 16 --rank-a 64 \
   --alpha-b 16 --rank-b 64
 
-CUDA_VISIBLE_DEVICES=7 "${PYTHON_BIN}" "${ROOT}/src/eval_retrieval.py" \
+mkdir -p "${LOG_DIR}/circo_final_step1400"
+CUDA_VISIBLE_DEVICES="${CIRCO_GPU}" "${PYTHON_BIN}" "${ROOT}/src/eval_retrieval.py" \
   --resume "${FINAL_MERGED}" \
   --openai-pretrained \
   --model "ViT-B/16" \
