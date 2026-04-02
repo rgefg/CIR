@@ -5,17 +5,19 @@ ROOT="/data2/mingyu/composed_image_retrieval"
 PYTHON_BIN="${PYTHON_BIN:-/data2/mingyu/miniconda3/envs/torch/bin/python}"
 export PYTHONPATH="${ROOT}:${ROOT}/src:${PYTHONPATH:-}"
 
-RUN_NAME="DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTB16_EMA1400_And_NoDrop_CIRR"
+RUN_NAME="DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTB32_OpenAI_And_NoDrop_CIRR"
 LOG_DIR="${ROOT}/logs/${RUN_NAME}"
 CKPT_DIR="${LOG_DIR}/checkpoints"
 FINAL_MERGED="/tmp/${RUN_NAME}_step1400_merged.pt"
 
 rm -rf "${LOG_DIR}"
 
-MODEL_NAME="ViT-B/16" \
+MODEL_NAME="ViT-B/32" \
+OPENAI_PRETRAINED="1" \
+PIC2WORD_CKPT="" \
 RETRIEVAL_PROMPT_CONNECTOR="and" \
-TRAIN_CUDA_DEVICES="2,3" \
-DIST_URL="tcp://127.0.0.1:6171" \
+TRAIN_CUDA_DEVICES="6,7" \
+DIST_URL="tcp://127.0.0.1:6172" \
 RUN_NAME="${RUN_NAME}" \
 INSTRUCTION_DROPOUT_PROB="0.0" \
 TRAIN_EPOCH_STEPS="1400" \
@@ -41,10 +43,10 @@ bash "${ROOT}/train_with_dropout.sh"
   --alpha-b 16 --rank-b 64
 
 mkdir -p "${LOG_DIR}/cirr_test_step1400"
-CUDA_VISIBLE_DEVICES=2 "${PYTHON_BIN}" "${ROOT}/src/eval_retrieval.py" \
+CUDA_VISIBLE_DEVICES=6 "${PYTHON_BIN}" "${ROOT}/src/eval_retrieval.py" \
   --resume "${FINAL_MERGED}" \
   --openai-pretrained \
-  --model "ViT-B/16" \
+  --model "ViT-B/32" \
   --eval-mode cirr_test \
   --gpu 0 \
   --batch-size 48 \

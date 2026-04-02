@@ -5,7 +5,7 @@ ROOT="/data2/mingyu/composed_image_retrieval"
 PYTHON_BIN="${PYTHON_BIN:-/data2/mingyu/miniconda3/envs/torch/bin/python}"
 export PYTHONPATH="${ROOT}:${ROOT}/src:${PYTHONPATH:-}"
 
-RUN_NAME="DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTB16_EMA1400_And_Drop0p5_GeneCIS_CIRCO"
+RUN_NAME="DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTB32_OpenAI_And_Drop0p5_GeneCIS_CIRCO"
 LOG_DIR="${ROOT}/logs/${RUN_NAME}"
 CKPT_DIR="${LOG_DIR}/checkpoints"
 GENECIS_JSONL="${LOG_DIR}/genecis_merged.jsonl"
@@ -13,7 +13,9 @@ FINAL_MERGED="/tmp/${RUN_NAME}_step1400_merged.pt"
 
 rm -rf "${LOG_DIR}"
 
-MODEL_NAME="ViT-B/16" \
+MODEL_NAME="ViT-B/32" \
+OPENAI_PRETRAINED="1" \
+PIC2WORD_CKPT="" \
 RETRIEVAL_PROMPT_CONNECTOR="and" \
 TRAIN_CUDA_DEVICES="6,7" \
 DIST_URL="tcp://127.0.0.1:6170" \
@@ -53,7 +55,7 @@ for STEP in 600 800 1000 1200 1400; do
     --resume "${MERGED_CKPT}" \
     --output-json "${OUT_JSON}" \
     --gpu 0 \
-    --model "ViT-B/16" \
+    --model "ViT-B/32" \
     --batch-size 32 \
     --workers 2 \
     --genecis-batch-size 32 \
@@ -92,7 +94,7 @@ mkdir -p "${LOG_DIR}/circo_final_step1400"
 CUDA_VISIBLE_DEVICES=7 "${PYTHON_BIN}" "${ROOT}/src/eval_retrieval.py" \
   --resume "${FINAL_MERGED}" \
   --openai-pretrained \
-  --model "ViT-B/16" \
+  --model "ViT-B/32" \
   --eval-mode circo \
   --gpu 0 \
   --batch-size 32 \
