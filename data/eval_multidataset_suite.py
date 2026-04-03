@@ -34,6 +34,9 @@ def parse_args():
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--genecis-batch-size", type=int, default=32)
     parser.add_argument("--model", type=str, default="ViT-L/14")
+    parser.add_argument("--img2text-arch", type=str, default="im2text")
+    parser.add_argument("--middle-dim", type=int, default=512)
+    parser.add_argument("--img2text-pretrained", type=str, default=None)
     parser.add_argument("--name", type=str, default="multidataset_eval")
     parser.add_argument("--logs", type=str, default=str(REPO_ROOT / "logs"))
     parser.add_argument("--datasets", type=str, default="fashioniq,circo,genecis")
@@ -43,8 +46,10 @@ def parse_args():
 def build_eval_args(args):
     return SimpleNamespace(
         model=args.model,
-        middle_dim=512,
+        middle_dim=args.middle_dim,
         n_layer=2,
+        img2text_arch=args.img2text_arch,
+        img2text_pretrained=args.img2text_pretrained,
         precision="amp",
         gpu=args.gpu,
         distributed=False,

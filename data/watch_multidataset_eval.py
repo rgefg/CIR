@@ -38,6 +38,10 @@ def parse_args():
     parser.add_argument("--cpu-affinity", type=str, default=None)
     parser.add_argument("--cpu-threads", type=int, default=1)
     parser.add_argument("--datasets", type=str, default="fashioniq,genecis")
+    parser.add_argument("--model", type=str, default="ViT-L/14")
+    parser.add_argument("--img2text-arch", type=str, default="im2text")
+    parser.add_argument("--middle-dim", type=int, default=512)
+    parser.add_argument("--img2text-pretrained", type=str, default=None)
     parser.add_argument("--min-step", type=int, default=0)
     parser.add_argument("--stop-on-final", action="store_true", default=False)
     parser.add_argument("--once", action="store_true", default=False)
@@ -224,6 +228,12 @@ def evaluate_checkpoint(eval_script: Path, resume_path: Path, args, limited_env,
         str(tmp_output),
         "--gpu",
         "0",
+        "--model",
+        args.model,
+        "--img2text-arch",
+        args.img2text_arch,
+        "--middle-dim",
+        str(args.middle_dim),
         "--batch-size",
         str(args.batch_size),
         "--workers",
@@ -235,6 +245,8 @@ def evaluate_checkpoint(eval_script: Path, resume_path: Path, args, limited_env,
         "--name",
         eval_name,
     ]
+    if args.img2text_pretrained:
+        eval_cmd.extend(["--img2text-pretrained", args.img2text_pretrained])
     code, output = run_command(eval_cmd, timeout=args.timeout, env=eval_env)
     metrics = None
     if code == 0 and tmp_output.exists():
