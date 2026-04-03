@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 
 from third_party.open_clip.scheduler import cosine_lr
 from model.clip import _transform, load
-from model.model import convert_weights, CLIP, IM2TEXT, LoRAMultiheadAttention, LoRALinear as ModelLoRALinear
+from model.model import convert_weights, CLIP, IM2TEXT, Phi, LoRAMultiheadAttention, LoRALinear as ModelLoRALinear
 from trainer import train
 from data import get_data, CIRR, FashionIQ, GeneCISDataset
 from params import parse_args, get_project_root
@@ -469,13 +469,45 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     # =========================================================================
     # 2. Build img2text Mapping Network
     # =========================================================================
-    img2text = IM2TEXT(
-        embed_dim=model.embed_dim,
-        middle_dim=args.middle_dim,
-        output_dim=model.token_embedding.weight.shape[1],
-        n_layer=args.n_layer,
-        dropout=getattr(args, "droprate", 0.1),
-    )
+    img2text_arch = getattr(args, "img2text_arch", "im2text")
+    if img2text_arch == "phi":
+        phi_hidden = getattr(args, "middle_dim", 2048)
+        img2text = Phi(
+            input_dim=model.embed_dim,
+            hidden_dim=phi_hidden,
+            output_dim=model.token_embedding.weight.shape[1],
+            dropout=getattr(args, "droprate", 0.5),
+        )
+        if is_master(args):
+            logging.info(f"Using Phi (SEARLE-style) img2text: {model.embed_dim} -> {phi_hidden} -> {model.token_embedding.weight.shape[1]}")
+    else:
+        img2text = IM2TEXT(
+            embed_dim=model.embed_dim,
+            middle_dim=args.middle_dim,
+            output_dim=model.token_embedding.weight.shape[1],
+            n_layer=args.n_layer,
+            dropout=getattr(args, "droprate", 0.1),
+        )
+
+    # =========================================================================
+    # 2b. Load SEARLE / external img2text pretrained weights
+    # =========================================================================
+    img2text_pretrained = getattr(args, "img2text_pretrained", None)
+    if img2text_pretrained:
+        if is_master(args):
+            logging.info(f"Loading img2text pretrained weights from: {img2text_pretrained}")
+        ckpt = _safe_torch_load(img2text_pretrained, map_location='cpu', weights_only=False)
+        if isinstance(ckpt, dict) and "Phi" in ckpt:
+            sd = ckpt["Phi"]
+        elif isinstance(ckpt, dict) and "state_dict_img2text" in ckpt:
+            sd = ckpt["state_dict_img2text"]
+        else:
+            sd = ckpt
+        if next(iter(sd.keys()), "").startswith("module."):
+            sd = {k[len("module."):]: v for k, v in sd.items()}
+        msg = img2text.load_state_dict(sd, strict=False)
+        if is_master(args):
+            logging.info(f"img2text pretrained load: missing={msg.missing_keys}, unexpected={msg.unexpected_keys}")
 
     # =========================================================================
     # 3. Load img2text weights (CRITICAL FIX)
@@ -557,7 +589,13 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     else:
         if is_master(args):
             logging.warning("=" * 80)
-            logging.warning("⚠️ WARNING: No pic2word pretrained path provided. img2text is INITIALIZED FROM SCRATCH (Random)!")
+            if img2text_pretrained:
+                logging.warning(
+                    "ℹ️ No pic2word checkpoint provided. Using external img2text pretrained weights "
+                    f"from: {img2text_pretrained}"
+                )
+            else:
+                logging.warning("⚠️ WARNING: No pic2word or img2text pretrained path provided. img2text is INITIALIZED FROM SCRATCH (Random)!")
             logging.warning("=" * 80)
 
     # =========================================================================
