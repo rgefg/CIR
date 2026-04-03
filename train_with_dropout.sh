@@ -15,6 +15,9 @@ RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS56_Accum8_EMA1000_ThatAlign_
 MODEL_NAME="${MODEL_NAME:-ViT-L/14}"
 RETRIEVAL_PROMPT_CONNECTOR="${RETRIEVAL_PROMPT_CONNECTOR:-that}"
 OPENAI_PRETRAINED="${OPENAI_PRETRAINED:-0}"
+IMG2TEXT_ARCH="${IMG2TEXT_ARCH:-im2text}"
+IMG2TEXT_PRETRAINED="${IMG2TEXT_PRETRAINED:-}"
+MIDDLE_DIM="${MIDDLE_DIM:-512}"
 
 TRAIN_JSON="${TRAIN_JSON:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2_with_reverse.jsonl}"
 REVERSE_JSON="${REVERSE_JSON:-}"
@@ -139,6 +142,9 @@ trap cleanup EXIT
 echo "Run name: ${RUN_NAME}"
 echo "Training GPUs: ${TRAIN_CUDA_DEVICES}"
 echo "Model: ${MODEL_NAME}"
+echo "img2text arch: ${IMG2TEXT_ARCH}"
+echo "img2text pretrained: ${IMG2TEXT_PRETRAINED:-<none>}"
+echo "img2text middle dim: ${MIDDLE_DIM}"
 echo "OpenAI pretrained: ${OPENAI_PRETRAINED}"
 echo "Retrieval prompt connector: ${RETRIEVAL_PROMPT_CONNECTOR}"
 echo "Pic2word checkpoint: ${PIC2WORD_CKPT:-<none>}"
@@ -236,6 +242,10 @@ else
   if [[ -n "${PIC2WORD_CKPT}" ]]; then
     PIC2WORD_ARGS+=(--pic2word-pretrained "${PIC2WORD_CKPT}")
   fi
+  IMG2TEXT_ARGS=(--img2text-arch "${IMG2TEXT_ARCH}" --middle_dim "${MIDDLE_DIM}")
+  if [[ -n "${IMG2TEXT_PRETRAINED}" ]]; then
+    IMG2TEXT_ARGS+=(--img2text-pretrained "${IMG2TEXT_PRETRAINED}")
+  fi
   CUDA_VISIBLE_DEVICES="${TRAIN_CUDA_DEVICES}" "${PYTHON_BIN}" -u src/main.py \
     --name "${RUN_NAME}" \
     --dataset-type cc3m_cir_wds \
@@ -247,6 +257,7 @@ else
     --wds-shardshuffle "${WDS_SHARDSHUFFLE}" \
     --model "${MODEL_NAME}" \
     "${PIC2WORD_ARGS[@]}" \
+    "${IMG2TEXT_ARGS[@]}" \
     --batch-size "${TRAIN_BATCH_SIZE}" \
     --accum-steps "${TRAIN_ACCUM_STEPS}" \
     --epochs 1 \

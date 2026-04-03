@@ -14,7 +14,7 @@ STEP_EMA_RE = re.compile(r"epoch_(?P<epoch>\d+)_step_(?P<step>\d+)_ema\.pt$")
 FINAL_RAW_RE = re.compile(r"epoch_(?P<epoch>\d+)\.pt$")
 FINAL_EMA_RE = re.compile(r"epoch_(?P<epoch>\d+)_ema\.pt$")
 FEATURE_RE = re.compile(r"Eval\s+(\w+)\s+Feature")
-METRIC_RE = re.compile(r"(recall_[^:]+):\s*([0-9.]+)")
+METRIC_RE = re.compile(r"([A-Za-z0-9_@]+):\s*([0-9.]+)")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MERGE_SCRIPT = REPO_ROOT / "data" / "merge_lora_ties.py"
@@ -27,6 +27,9 @@ def parse_args():
     parser.add_argument("--output-jsonl", type=Path, required=True)
     parser.add_argument("--eval-gpu", type=int, required=True)
     parser.add_argument("--model", type=str, default="ViT-B/32")
+    parser.add_argument("--img2text-arch", type=str, default="im2text")
+    parser.add_argument("--middle-dim", type=int, default=512)
+    parser.add_argument("--img2text-pretrained", type=str, default=None)
     parser.add_argument("--batch-size", type=int, default=48)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--retrieval-weight", type=float, default=0.5)
@@ -198,11 +201,15 @@ def main():
             "--resume", str(temp_merged),
             "--openai-pretrained",
             "--model", args.model,
+            "--img2text-arch", args.img2text_arch,
+            "--middle_dim", str(args.middle_dim),
             "--eval-mode", "cirr",
             "--gpu", "0",
             "--batch-size", str(args.batch_size),
             "--workers", str(args.workers),
         ]
+        if args.img2text_pretrained:
+            eval_cmd.extend(["--img2text-pretrained", args.img2text_pretrained])
         eval_return, eval_output = run_subprocess(eval_cmd, env=env)
         metrics = parse_metrics(eval_output)
         record = {
