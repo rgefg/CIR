@@ -5,7 +5,7 @@ ROOT="/data2/mingyu/composed_image_retrieval"
 PYTHON_BIN="${PYTHON_BIN:-/data2/mingyu/miniconda3/envs/torch/bin/python}"
 export PYTHONPATH="${ROOT}:${ROOT}/src:${PYTHONPATH:-}"
 
-RUN_NAME="DistillCIR_ParallelDualLoRA_BS256_Accum2_ViTB32_SEARLEPhi_And_Drop0p3_CIRCO1700"
+RUN_NAME="${RUN_NAME:-DistillCIR_ParallelDualLoRA_BS256_Accum2_ViTB32_SEARLEPhi_And_Drop0p3_CIRCO1700}"
 LOG_DIR="${ROOT}/logs/${RUN_NAME}"
 CKPT_DIR="${LOG_DIR}/checkpoints"
 OUT_JSONL="${LOG_DIR}/circoval_merged_gpu2.jsonl"
