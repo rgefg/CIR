@@ -861,7 +861,11 @@ def evaluate_circo(model, img2text, args, query_loader, gallery_loader):
             ref_imgs = ref_imgs.cuda(args.gpu, non_blocking=True)
 
             # 构造 Prompt
-            prompts = [f"a photo of * that {cap}" for cap in relative_caps]
+            connector = getattr(args, "retrieval_prompt_connector", "that")
+            if connector == "and":
+                prompts = [f"a photo of * and {cap}" for cap in relative_caps]
+            else:
+                prompts = [f"a photo of * that {cap}" for cap in relative_caps]
             texts = tokenize(prompts).cuda(args.gpu, non_blocking=True)
 
             # Image -> Soft Token
