@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--img2text-arch", type=str, default="im2text")
     parser.add_argument("--middle-dim", type=int, default=512)
     parser.add_argument("--img2text-pretrained", type=str, default=None)
+    parser.add_argument("--retrieval-prompt-connector", type=str, default="that", choices=["and", "that"])
     parser.add_argument("--name", type=str, default="multidataset_eval")
     parser.add_argument("--logs", type=str, default=str(REPO_ROOT / "logs"))
     parser.add_argument("--datasets", type=str, default="fashioniq,circo,genecis")
@@ -205,7 +206,7 @@ def compute_circo_metrics_local(query_dataset, predictions_dict, ranks):
     return map_atk, recall_atk, semantic_map_at10
 
 
-def eval_circo_val(model, img2text, preprocess, gpu, batch_size, workers):
+def eval_circo_val(model, img2text, preprocess, gpu, batch_size, workers, retrieval_prompt_connector="that"):
     circo_root = REPO_ROOT / "data" / "CIRCO"
     gallery_path = circo_root / "COCO2017_unlabeled" / "unlabeled2017"
     gallery_dataset = CustomFolder(str(gallery_path), transform=preprocess)
@@ -254,7 +255,10 @@ def eval_circo_val(model, img2text, preprocess, gpu, batch_size, workers):
             ref_imgs = batch["reference_img"].cuda(gpu, non_blocking=True)
             relative_caps = batch["relative_caption"]
             query_ids = batch["query_id"]
-            prompts = [f"a photo of * that {cap}" for cap in relative_caps]
+            if retrieval_prompt_connector == "and":
+                prompts = [f"a photo of * and {cap}" for cap in relative_caps]
+            else:
+                prompts = [f"a photo of * that {cap}" for cap in relative_caps]
             texts = tokenize(prompts).cuda(gpu, non_blocking=True)
             ref_img_feats = m.encode_image(ref_imgs)
             soft_tokens = img2text(ref_img_feats)
@@ -372,6 +376,7 @@ def main():
             cli_args.gpu,
             cli_args.batch_size,
             cli_args.workers,
+            cli_args.retrieval_prompt_connector,
         )
     if "genecis" in selected:
         result["genecis"] = eval_genecis(

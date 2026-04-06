@@ -18,6 +18,11 @@ OPENAI_PRETRAINED="${OPENAI_PRETRAINED:-0}"
 IMG2TEXT_ARCH="${IMG2TEXT_ARCH:-im2text}"
 IMG2TEXT_PRETRAINED="${IMG2TEXT_PRETRAINED:-}"
 MIDDLE_DIM="${MIDDLE_DIM:-512}"
+if [[ "${RETRIEVAL_PROMPT_CONNECTOR}" == "and" ]]; then
+  PROMPT_TEMPLATE="A photo of $ and {instruction}"
+else
+  PROMPT_TEMPLATE="A photo of $ that {instruction}"
+fi
 
 TRAIN_JSON="${TRAIN_JSON:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2_with_reverse.jsonl}"
 REVERSE_JSON="${REVERSE_JSON:-}"
@@ -147,6 +152,7 @@ echo "img2text pretrained: ${IMG2TEXT_PRETRAINED:-<none>}"
 echo "img2text middle dim: ${MIDDLE_DIM}"
 echo "OpenAI pretrained: ${OPENAI_PRETRAINED}"
 echo "Retrieval prompt connector: ${RETRIEVAL_PROMPT_CONNECTOR}"
+echo "Prompt template: ${PROMPT_TEMPLATE}"
 echo "Pic2word checkpoint: ${PIC2WORD_CKPT:-<none>}"
 echo "Posthoc CIRR eval GPU: ${POSTHOC_CIRR_GPU}"
 echo "Posthoc FashionIQ/GeneCIS eval GPU: ${POSTHOC_MULTIDATASET_GPU}"
@@ -279,6 +285,7 @@ else
     --lora-alpha "${LORA_ALPHA}" \
     --lora-dropout "${LORA_DROPOUT}" \
     --instruction-dropout-prob "${INSTRUCTION_DROPOUT_PROB}" \
+    --prompt-template "${PROMPT_TEMPLATE}" \
     --retrieval-prompt-connector "${RETRIEVAL_PROMPT_CONNECTOR}" \
     --logit-scale-clamp-min 9.0 \
     --logit-scale-clamp-max 36.6 \

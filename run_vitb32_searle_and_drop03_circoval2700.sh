@@ -63,6 +63,7 @@ run_step() {
     --output-json "${out_json}" \
     --gpu 0 \
     --model "ViT-B/32" \
+    --retrieval-prompt-connector "and" \
     --img2text-arch "phi" \
     --img2text-pretrained "/data2/mingyu/.cache/torch/hub/checkpoints/SEARLE_ViT-B32.pt" \
     --middle-dim 2048 \
