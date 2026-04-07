@@ -42,8 +42,9 @@ def parse_args():
     parser.add_argument("--base-kind", choices=["raw", "ema"], default="raw")
     parser.add_argument("--geo-kind", choices=["raw", "ema"], default="ema")
     parser.add_argument("--merge-script", type=Path, default=DEFAULT_MERGE_SCRIPT)
-    parser.add_argument("--merge-mode", choices=["ties", "shared_a_sum_b", "hybrid_layerwise"], default="ties")
-    parser.add_argument("--shared-a-num-layers", type=int, default=6)
+    parser.add_argument("--merge-mode", choices=["ties", "shared_b_sum_a", "hybrid_layerwise", "shared_a_sum_b"], default="ties")
+    parser.add_argument("--shared-b-num-layers", dest="shared_b_num_layers", type=int, default=6)
+    parser.add_argument("--shared-a-num-layers", dest="shared_b_num_layers", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--stop-on-final", action="store_true", default=False)
     parser.add_argument("--once", action="store_true", default=False)
     return parser.parse_args()
@@ -244,8 +245,8 @@ def main():
                 str(args.geo_weight),
                 "--merge-mode",
                 str(args.merge_mode),
-                "--shared-a-num-layers",
-                str(args.shared_a_num_layers),
+                "--shared-b-num-layers",
+                str(args.shared_b_num_layers),
                 "--density",
                 str(args.density),
                 "--text-only",

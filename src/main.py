@@ -190,7 +190,7 @@ def _tie_parameter(module: nn.Module, name: str, shared_param: nn.Parameter):
     setattr(module, name, shared_param)
 
 
-def _tie_lora_a_parameters(retr_module: nn.Module, geo_module: nn.Module, prefix: str, excluded_geo_names: set):
+def _tie_lora_b_parameters(retr_module: nn.Module, geo_module: nn.Module, prefix: str, excluded_geo_names: set):
     if retr_module is None or geo_module is None:
         return
 
@@ -198,36 +198,36 @@ def _tie_lora_a_parameters(retr_module: nn.Module, geo_module: nn.Module, prefix
         for proj_name in ["q_proj_lora", "k_proj_lora", "v_proj_lora"]:
             retr_proj = getattr(retr_module, proj_name, None)
             geo_proj = getattr(geo_module, proj_name, None)
-            if retr_proj is None or geo_proj is None or not hasattr(retr_proj, "A") or not hasattr(geo_proj, "A"):
+            if retr_proj is None or geo_proj is None or not hasattr(retr_proj, "B") or not hasattr(geo_proj, "B"):
                 continue
-            if retr_proj.A.shape != geo_proj.A.shape:
+            if retr_proj.B.shape != geo_proj.B.shape:
                 raise RuntimeError(
-                    f"Shared-A shape mismatch at {prefix}.{proj_name}: "
-                    f"{tuple(retr_proj.A.shape)} vs {tuple(geo_proj.A.shape)}"
+                    f"Shared-B shape mismatch at {prefix}.{proj_name}: "
+                    f"{tuple(retr_proj.B.shape)} vs {tuple(geo_proj.B.shape)}"
                 )
-            _tie_parameter(geo_proj, "A", retr_proj.A)
-            excluded_geo_names.add(f"{prefix}.{proj_name}.A")
+            _tie_parameter(geo_proj, "B", retr_proj.B)
+            excluded_geo_names.add(f"{prefix}.{proj_name}.B")
 
         retr_out = getattr(retr_module, "out_proj", None)
         geo_out = getattr(geo_module, "out_proj", None)
         if _is_lora_linear(retr_out) and _is_lora_linear(geo_out):
-            if retr_out.A.shape != geo_out.A.shape:
+            if retr_out.B.shape != geo_out.B.shape:
                 raise RuntimeError(
-                    f"Shared-A shape mismatch at {prefix}.out_proj: "
-                    f"{tuple(retr_out.A.shape)} vs {tuple(geo_out.A.shape)}"
+                    f"Shared-B shape mismatch at {prefix}.out_proj: "
+                    f"{tuple(retr_out.B.shape)} vs {tuple(geo_out.B.shape)}"
                 )
-            _tie_parameter(geo_out, "A", retr_out.A)
-            excluded_geo_names.add(f"{prefix}.out_proj.A")
+            _tie_parameter(geo_out, "B", retr_out.B)
+            excluded_geo_names.add(f"{prefix}.out_proj.B")
         return
 
     if _is_lora_linear(retr_module) and _is_lora_linear(geo_module):
-        if retr_module.A.shape != geo_module.A.shape:
+        if retr_module.B.shape != geo_module.B.shape:
             raise RuntimeError(
-                f"Shared-A shape mismatch at {prefix}: "
-                f"{tuple(retr_module.A.shape)} vs {tuple(geo_module.A.shape)}"
+                f"Shared-B shape mismatch at {prefix}: "
+                f"{tuple(retr_module.B.shape)} vs {tuple(geo_module.B.shape)}"
             )
-        _tie_parameter(geo_module, "A", retr_module.A)
-        excluded_geo_names.add(f"{prefix}.A")
+        _tie_parameter(geo_module, "B", retr_module.B)
+        excluded_geo_names.add(f"{prefix}.B")
 
 
 _RESBLOCK_RE = re.compile(r"(^|\.)resblocks\.(\d+)(\.|$)")
@@ -240,7 +240,7 @@ def _text_resblock_index(module_name: str):
     return int(match.group(2))
 
 
-def tie_shared_a_between_text_branches(clip_model: nn.Module, text_branch: nn.Module, num_layers: int = 6) -> set:
+def tie_shared_b_between_text_branches(clip_model: nn.Module, text_branch: nn.Module, num_layers: int = 6) -> set:
     base = clip_model.module if hasattr(clip_model, "module") else clip_model
     branch = text_branch.module if hasattr(text_branch, "module") else text_branch
 
@@ -258,12 +258,12 @@ def tie_shared_a_between_text_branches(clip_model: nn.Module, text_branch: nn.Mo
             continue
         before_count = len(excluded_geo_names)
         prefix = f"transformer.{name}" if name else "transformer"
-        _tie_lora_a_parameters(retr_module, geo_module, prefix, excluded_geo_names)
+        _tie_lora_b_parameters(retr_module, geo_module, prefix, excluded_geo_names)
         if len(excluded_geo_names) > before_count:
             tied_count += len(excluded_geo_names) - before_count
 
     if tied_count == 0:
-        raise RuntimeError("Shared-A LoRA was enabled, but no text LoRA A tensors were tied.")
+        raise RuntimeError("Shared-B LoRA was enabled, but no text LoRA B tensors were tied.")
     return excluded_geo_names
 
 
@@ -610,8 +610,8 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     
     freeze_clip_except_lora_and_logit_scale(model)
     geo_text_model = None
-    shared_a_geo_exclude_names = set()
-    args.shared_a_param_names = []
+    shared_b_geo_exclude_names = set()
+    args.shared_b_param_names = []
     if float(getattr(args, "geo_weight", 0.0)) > 0.0:
         geo_text_model = TextEncoderBranch(model)
         if not getattr(args, "no_lora", False):
@@ -622,23 +622,23 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                 dropout=getattr(args, "geo_lora_dropout", 0.0),
             )
         freeze_module_except_lora(geo_text_model)
-        if getattr(args, "shared_a_lora", False):
-            shared_a_geo_exclude_names = tie_shared_a_between_text_branches(
+        if getattr(args, "shared_b_lora", False):
+            shared_b_geo_exclude_names = tie_shared_b_between_text_branches(
                 model,
                 geo_text_model,
-                num_layers=int(getattr(args, "shared_a_num_layers", 6)),
+                num_layers=int(getattr(args, "shared_b_num_layers", 6)),
             )
-            args.shared_a_param_names = sorted(shared_a_geo_exclude_names)
+            args.shared_b_param_names = sorted(shared_b_geo_exclude_names)
             if is_master(args):
                 logging.info(
-                    f"✅ Enabled Shared-A LoRA on text encoder: tied {len(shared_a_geo_exclude_names)} geo A tensors "
-                    f"across shallow blocks [0, {int(getattr(args, 'shared_a_num_layers', 6)) - 1}]; "
-                    "geo optimizer will update only task-specific B."
+                    f"✅ Enabled Shared-B LoRA on text encoder: tied {len(shared_b_geo_exclude_names)} geo B tensors "
+                    f"across shallow blocks [0, {int(getattr(args, 'shared_b_num_layers', 6)) - 1}]; "
+                    "geo optimizer will update only task-specific A."
                 )
-                if getattr(args, "shared_a_retrieval_only_update", False):
+                if getattr(args, "shared_b_retrieval_only_update", False):
                     logging.info(
-                        "✅ Shared-A retrieval-only update is enabled: geo branch uses retrieval A in forward, "
-                        "but shared A gradients are restored to retrieval-only values before optimizer step."
+                        "✅ Shared-B retrieval-only update is enabled: geo branch uses retrieval B in forward, "
+                        "but shared B gradients are restored to retrieval-only values before optimizer step."
                     )
     
     # ============================================================
@@ -891,7 +891,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     geo_param_groups = build_param_groups(
         geo_named_parameters,
         args.geo_wd,
-        exclude_name_set=shared_a_geo_exclude_names,
+        exclude_name_set=shared_b_geo_exclude_names,
     )
     if geo_param_groups:
         geo_optimizer = optim.AdamW(

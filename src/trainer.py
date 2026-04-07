@@ -1352,13 +1352,13 @@ def train(
                 f"Geo branch uses an independent torch RNG stream with seed={geo_rng_seed}."
             )
 
-    shared_a_param_names = set(getattr(args, "shared_a_param_names", []) or [])
-    shared_a_retrieval_only = bool(
-        getattr(args, "shared_a_lora", False) and getattr(args, "shared_a_retrieval_only_update", False)
+    shared_b_param_names = set(getattr(args, "shared_b_param_names", []) or [])
+    shared_b_retrieval_only = bool(
+        getattr(args, "shared_b_lora", False) and getattr(args, "shared_b_retrieval_only_update", False)
     )
-    if shared_a_retrieval_only and is_master(args):
+    if shared_b_retrieval_only and is_master(args):
         logging.info(
-            f"Shared-A retrieval-only update active for {len(shared_a_param_names)} text LoRA A tensors."
+            f"Shared-B retrieval-only update active for {len(shared_b_param_names)} text LoRA B tensors."
         )
 
     ema_pairs = [
@@ -1457,9 +1457,9 @@ def train(
                     )
                     total_loss = retrieval_loss / float(accum_steps)
                 retrieval_scaler.scale(total_loss).backward()
-                shared_a_saved_grads = None
-                if geo_enabled and shared_a_retrieval_only and shared_a_param_names:
-                    shared_a_saved_grads = _capture_named_grads(m, shared_a_param_names)
+                shared_b_saved_grads = None
+                if geo_enabled and shared_b_retrieval_only and shared_b_param_names:
+                    shared_b_saved_grads = _capture_named_grads(m, shared_b_param_names)
                 if geo_enabled:
                     geo_indices, geo_sampling_stats = select_geo_subset(
                         src_captions,
@@ -1506,11 +1506,11 @@ def train(
                             weighted_geo_loss = geo_loss * geo_weight
                         if torch.isfinite(weighted_geo_loss.detach()).all():
                             geo_scaler.scale(weighted_geo_loss / float(accum_steps)).backward()
-                            if shared_a_saved_grads is not None:
-                                restored_count = _restore_named_grads(m, shared_a_saved_grads)
+                            if shared_b_saved_grads is not None:
+                                restored_count = _restore_named_grads(m, shared_b_saved_grads)
                                 if loss_stats is None:
                                     loss_stats = {}
-                                loss_stats["shared_a_restored"] = float(restored_count)
+                                loss_stats["shared_b_restored"] = float(restored_count)
                         else:
                             if geo_stats is None:
                                 geo_stats = {}
@@ -1529,9 +1529,9 @@ def train(
                     args,
                 )
                 (retrieval_loss / float(accum_steps)).backward()
-                shared_a_saved_grads = None
-                if geo_enabled and shared_a_retrieval_only and shared_a_param_names:
-                    shared_a_saved_grads = _capture_named_grads(m, shared_a_param_names)
+                shared_b_saved_grads = None
+                if geo_enabled and shared_b_retrieval_only and shared_b_param_names:
+                    shared_b_saved_grads = _capture_named_grads(m, shared_b_param_names)
                 if geo_enabled:
                     geo_indices, geo_sampling_stats = select_geo_subset(
                         src_captions,
@@ -1576,11 +1576,11 @@ def train(
                             geo_aux = {"geo_logits_unit": None}
                         weighted_geo_loss = geo_loss * geo_weight
                         (weighted_geo_loss / float(accum_steps)).backward()
-                        if shared_a_saved_grads is not None:
-                            restored_count = _restore_named_grads(m, shared_a_saved_grads)
+                        if shared_b_saved_grads is not None:
+                            restored_count = _restore_named_grads(m, shared_b_saved_grads)
                             if loss_stats is None:
                                 loss_stats = {}
-                            loss_stats["shared_a_restored"] = float(restored_count)
+                            loss_stats["shared_b_restored"] = float(restored_count)
                 else:
                     geo_loss, geo_stats, geo_aux, weighted_geo_loss = None, None, None, None
 

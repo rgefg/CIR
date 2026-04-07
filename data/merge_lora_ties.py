@@ -114,15 +114,17 @@ def main() -> None:
       "--merge-mode",
       type=str,
       default="ties",
-      choices=["ties", "shared_a_sum_b", "hybrid_layerwise"],
-      help="Use TIES in delta space, or keep base A fixed and sum only B for Shared-A LoRA.",
+      choices=["ties", "shared_b_sum_a", "hybrid_layerwise", "shared_a_sum_b"],
+      help="Use TIES in delta space, or keep base B fixed and sum only A for Shared-B LoRA.",
    )
    parser.add_argument(
-      "--shared-a-num-layers",
+      "--shared-b-num-layers",
+      dest="shared_b_num_layers",
       type=int,
       default=6,
-      help="When merge-mode=hybrid_layerwise, use Shared-A B-sum for shallow blocks [0, N-1] and TIES for deeper blocks.",
+      help="When merge-mode=hybrid_layerwise, use Shared-B A-sum for shallow blocks [0, N-1] and TIES for deeper blocks.",
    )
+   parser.add_argument("--shared-a-num-layers", dest="shared_b_num_layers", type=int, help=argparse.SUPPRESS)
    parser.add_argument("--text-only", action="store_true", default=False, help="Merge only text encoder LoRA pairs.")
    parser.add_argument("--all-lora", action="store_true", default=False, help="Merge both text and visual LoRA pairs.")
    parser.add_argument("--base", type=str, default="b", choices=["a", "b"], help="Output structure base checkpoint.")
@@ -196,28 +198,28 @@ def main() -> None:
    w = torch.tensor(args.weights, dtype=torch.float32)
    merged_AB: Dict[str, torch.Tensor] = {}
    copied_b_only_prefixes = 0
-   shared_a_mismatch_prefixes = 0
+   shared_b_mismatch_prefixes = 0
    shallow_shared_prefixes = 0
    deep_ties_prefixes = 0
    weight_a = float(args.weights[0])
    weight_b = float(args.weights[1])
 
-   def _write_shared_a_sum(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor]):
-      nonlocal shared_a_mismatch_prefixes
+   def _write_shared_b_sum(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor]):
+      nonlocal shared_b_mismatch_prefixes
       aA = pa["A"].float()
       aB = pa["B"].float()
       bA = pb["A"].float()
       bB = pb["B"].float()
-      if aA.shape != bA.shape:
+      if aB.shape != bB.shape:
          raise RuntimeError(
-            f"Shared-A merge requires matching A shapes for {prefix}: {tuple(aA.shape)} vs {tuple(bA.shape)}"
+            f"Shared-B merge requires matching B shapes for {prefix}: {tuple(aB.shape)} vs {tuple(bB.shape)}"
          )
-      if not torch.allclose(aA, bA, rtol=1e-4, atol=1e-5):
-         shared_a_mismatch_prefixes += 1
-      a_ref = aA if args.base == "a" else bA
+      if not torch.allclose(aB, bB, rtol=1e-4, atol=1e-5):
+         shared_b_mismatch_prefixes += 1
+      b_ref = aB if args.base == "a" else bB
       coeff_a = weight_a * (scale_a / base_scale)
       coeff_b = weight_b * (scale_b / base_scale)
-      merged_B = (coeff_a * aB) + (coeff_b * bB)
+      merged_A = (coeff_a * aA) + (coeff_b * bA)
       out_dtype = pair_b[prefix]["A"].dtype if args.base == "b" else pair_a[prefix]["A"].dtype
       if args.base == "b":
          kA = pair_b[prefix].get("A_key", prefix + ".A")
@@ -225,8 +227,8 @@ def main() -> None:
       else:
          kA = pair_a[prefix].get("A_key", prefix + ".A")
          kB = pair_a[prefix].get("B_key", prefix + ".B")
-      merged_AB[kA] = a_ref.to(dtype=out_dtype)
-      merged_AB[kB] = merged_B.to(dtype=out_dtype)
+      merged_AB[kA] = merged_A.to(dtype=out_dtype)
+      merged_AB[kB] = b_ref.to(dtype=out_dtype)
 
    def _write_delta_ties(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor]):
       aA = pa["A"].float()
@@ -255,13 +257,14 @@ def main() -> None:
       merged_AB[kB] = mB
 
    for p in valid_prefixes:
-      if args.merge_mode == "shared_a_sum_b":
-         _write_shared_a_sum(p, pair_a[p], pair_b[p])
-      elif args.merge_mode == "hybrid_layerwise":
+      effective_merge_mode = "shared_b_sum_a" if args.merge_mode == "shared_a_sum_b" else args.merge_mode
+      if effective_merge_mode == "shared_b_sum_a":
+         _write_shared_b_sum(p, pair_a[p], pair_b[p])
+      elif effective_merge_mode == "hybrid_layerwise":
          layer_idx = _text_resblock_index(p)
-         if layer_idx is not None and layer_idx < int(args.shared_a_num_layers):
+         if layer_idx is not None and layer_idx < int(args.shared_b_num_layers):
             shallow_shared_prefixes += 1
-            _write_shared_a_sum(p, pair_a[p], pair_b[p])
+            _write_shared_b_sum(p, pair_a[p], pair_b[p])
          else:
             deep_ties_prefixes += 1
             _write_delta_ties(p, pair_a[p], pair_b[p])
@@ -278,14 +281,15 @@ def main() -> None:
          out_dtype = pb["A"].dtype
          kA = pb.get("A_key", p + ".A")
          kB = pb.get("B_key", p + ".B")
-         if args.merge_mode == "shared_a_sum_b":
+         effective_merge_mode = "shared_b_sum_a" if args.merge_mode == "shared_a_sum_b" else args.merge_mode
+         if effective_merge_mode == "shared_b_sum_a":
             coeff_b = weight_b * (scale_b / base_scale)
-            merged_AB[kA] = pb["A"].to(dtype=out_dtype)
-            merged_AB[kB] = (coeff_b * bB).to(dtype=out_dtype)
-         elif args.merge_mode == "hybrid_layerwise" and (_text_resblock_index(p) is not None and _text_resblock_index(p) < int(args.shared_a_num_layers)):
+            merged_AB[kA] = (coeff_b * bA).to(dtype=out_dtype)
+            merged_AB[kB] = pb["B"].to(dtype=out_dtype)
+         elif effective_merge_mode == "hybrid_layerwise" and (_text_resblock_index(p) is not None and _text_resblock_index(p) < int(args.shared_b_num_layers)):
             coeff_b = weight_b * (scale_b / base_scale)
-            merged_AB[kA] = pb["A"].to(dtype=out_dtype)
-            merged_AB[kB] = (coeff_b * bB).to(dtype=out_dtype)
+            merged_AB[kA] = (coeff_b * bA).to(dtype=out_dtype)
+            merged_AB[kB] = pb["B"].to(dtype=out_dtype)
          else:
             delta_b_eff = scale_b * (bB @ bA)
             delta_m = (weight_b * delta_b_eff) / base_scale
@@ -343,10 +347,10 @@ def main() -> None:
    print(f"replaced_tensors(A+B): {replaced}")
    print(f"weights: {args.weights}, density: {args.density}, sign: {args.majority_sign_method}")
    print(f"merge_mode: {args.merge_mode}")
-   print(f"shared_a_num_layers: {args.shared_a_num_layers}")
+   print(f"shared_b_num_layers: {args.shared_b_num_layers}")
    print(f"shallow_shared_prefixes: {shallow_shared_prefixes}")
    print(f"deep_ties_prefixes: {deep_ties_prefixes}")
-   print(f"shared_a_mismatch_prefixes: {shared_a_mismatch_prefixes}")
+   print(f"shared_b_mismatch_prefixes: {shared_b_mismatch_prefixes}")
    print(f"scale_a(alpha/r): {scale_a}, scale_b(alpha/r): {scale_b}, base_scale: {base_scale}")
    print(f"scope: {'all_lora' if args.all_lora else ('text_only' if args.text_only else 'default')}")
    print(f"output: {args.output}")

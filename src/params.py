@@ -133,6 +133,15 @@ def parse_args():
         "--n-layer", type=int, default=2, help="Number of layers in im2text"
     )
     parser.add_argument(
+        "--img2text-arch", type=str, default="im2text",
+        choices=["im2text", "phi"],
+        help="Architecture for img-to-text mapping: im2text (original) or phi (SEARLE-style)."
+    )
+    parser.add_argument(
+        "--img2text-pretrained", type=str, default=None,
+        help="Path to pretrained img2text/phi checkpoint (e.g. SEARLE .pt file)."
+    )
+    parser.add_argument(
         "--dataset-type",
         choices=["webdataset", "csv", "inet", "auto", "inet,csv","cc3m_cir_wds", "csv,inet", "directory", "fashion-iq", "cirr", "imgnet_r", "circo"],
         default="auto",
@@ -556,12 +565,15 @@ def parse_args():
                         help="Subset strategy for the geo branch within each retrieval batch.")
     parser.add_argument("--geo-topk", type=int, default=0,
                         help="If > 0 and geo-sampling-mode is not all, keep only the top-k selected geo samples per batch.")
-    parser.add_argument("--shared-a-lora", action="store_true", default=False,
-                        help="Tie text LoRA A tensors between retrieval and geo branches, keeping only B task-specific.")
-    parser.add_argument("--shared-a-num-layers", type=int, default=6,
-                        help="Number of shallow text transformer blocks that use Shared-A LoRA. Deeper blocks remain task-specific.")
-    parser.add_argument("--shared-a-retrieval-only-update", action="store_true", default=False,
-                        help="When Shared-A LoRA is enabled, let geo branch use the shared A in forward but restore A gradients to retrieval-only values before stepping.")
+    parser.add_argument("--shared-b-lora", dest="shared_b_lora", action="store_true", default=False,
+                        help="Tie text LoRA B tensors between retrieval and geo branches, keeping only A task-specific.")
+    parser.add_argument("--shared-a-lora", dest="shared_b_lora", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--shared-b-num-layers", dest="shared_b_num_layers", type=int, default=6,
+                        help="Number of shallow text transformer blocks that use Shared-B LoRA. Deeper blocks remain task-specific.")
+    parser.add_argument("--shared-a-num-layers", dest="shared_b_num_layers", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--shared-b-retrieval-only-update", dest="shared_b_retrieval_only_update", action="store_true", default=False,
+                        help="When Shared-B LoRA is enabled, let geo branch use the shared B in forward but restore B gradients to retrieval-only values before stepping.")
+    parser.add_argument("--shared-a-retrieval-only-update", dest="shared_b_retrieval_only_update", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--conflict-probe", action="store_true", default=False,
                         help="Monitor same-batch retrieval/edit gradient conflict during training and export averaged statistics.")
     parser.add_argument("--conflict-probe-every", type=int, default=0,
