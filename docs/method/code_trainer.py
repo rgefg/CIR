@@ -13,9 +13,6 @@ def _build_retrieval_prompt(instruction, placeholder, args):
     inst_str = _to_text(instruction).strip()
     if not inst_str:
         return f"a photo of {placeholder}"
-    connector = getattr(args, "retrieval_prompt_connector", "that")
-    if connector == "and":
-        return f"a photo of {placeholder} and {inst_str}"
     return f"a photo of {placeholder} that {inst_str}"
 
 
@@ -101,7 +98,6 @@ def get_loss_geo_text_branch(
     在 text embedding 空间中要求：
     - f_fwd 方向 ≈ (f_tgt - f_src) 方向
     - f_rev 方向 ≈ -(f_tgt - f_src) 方向
-    - f_fwd 与 f_rev 不应同向 (reverse consistency)
     - f_fwd + f_rev ≈ 0 (zero-sum)
     """
     device = next(text_model.parameters()).device
@@ -129,18 +125,13 @@ def get_loss_geo_text_branch(
     rev_align = (z_rev * delta_rev).sum(dim=-1)
     loss_rev = (1.0 - rev_align[valid_mask]).mean()
 
-    # Loss 3: Reverse-consistency regularizer
-    rev_pair_cos = (z_fwd * z_rev).sum(dim=-1)
-    loss_reverse_consistency = F.relu(rev_pair_cos[valid_mask] + reverse_margin).mean()
-
-    # Loss 4: Zero-sum regularizer (z_fwd + z_rev 应该接近零向量)
+    # Loss 3: Zero-sum regularizer (z_fwd + z_rev 应该接近零向量)
     loss_zero = torch.norm((z_fwd + z_rev)[valid_mask], dim=-1).mean()
 
     # 总 geo loss
     geom_loss = (
         loss_fwd
         + loss_rev
-        + (reverse_weight * loss_reverse_consistency)
         + (zero_loss_weight * loss_zero)
     )
     return geom_loss, stats, aux

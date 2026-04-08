@@ -33,7 +33,7 @@
 > $$f_v = E_V(I_r).$$
 > A textual inversion network $\phi$ maps it to a pseudo-token feature
 > $$f_\phi = \phi(f_v),$$
-> which replaces a placeholder token in a dataset-specific prompt template $\mathcal{T}(t)$. In our implementation, the connector is aligned to the target benchmark: CIRR uses `and`, while CIRCO and FashionIQ use `that`.
+> which replaces a placeholder token in the standard Pic2Word-style prompt template $\mathcal{T}(t)$.
 >
 > **[统一记号]** Let $q$ denote the composed query embedding and $f_t$ denote the target-text embedding:
 > $$q = E_T(\mathcal{T}(t), f_\phi), \qquad f_t = E_T(c_{\text{tgt}}). \tag{1}$$
@@ -115,7 +115,7 @@
 
 > Let $\hat{f}_{\text{src}}, \hat{f}_{\text{tgt}}, \hat{f}_{\text{fwd}}, \hat{f}_{\text{rev}}$ denote L2-normalized text embeddings produced by $E_T^{\theta_g}$ from the source caption, target caption, forward instruction, and reverse instruction, respectively. We define the normalized caption displacement
 > $$\hat{\Delta} = \frac{\hat{f}_{\text{tgt}} - \hat{f}_{\text{src}}}{\|\hat{f}_{\text{tgt}} - \hat{f}_{\text{src}}\|_2}. \tag{3}$$
-> We then impose four complementary constraints:
+> We then impose three complementary constraints:
 >
 > **Forward alignment** — the forward instruction should point along the caption change:
 > $$\mathcal{L}_{\text{fwd}} = \mathbb{E}\left[1 - \langle \hat{f}_{\text{fwd}},\, \hat{\Delta} \rangle\right] \tag{4}$$
@@ -123,15 +123,11 @@
 > **Reverse alignment** — the reverse instruction should point in the opposite direction:
 > $$\mathcal{L}_{\text{rev}} = \mathbb{E}\left[1 - \langle \hat{f}_{\text{rev}},\, -\hat{\Delta} \rangle\right] \tag{5}$$
 >
-> **Reverse consistency** — forward and reverse instructions should not collapse to the same direction:
-> $$\mathcal{L}_{\text{rc}} = \mathbb{E}\left[\max\big(0,\ \langle \hat{f}_{\text{fwd}}, \hat{f}_{\text{rev}} \rangle + m\big)\right] \tag{6}$$
-> where $m$ is a cosine margin (set to zero in our implementation).
->
 > **Zero-sum regularizer** — forward and reverse embeddings should cancel:
-> $$\mathcal{L}_{\text{zero}} = \mathbb{E}\left[\|\hat{f}_{\text{fwd}} + \hat{f}_{\text{rev}}\|_2\right] \tag{7}$$
+> $$\mathcal{L}_{\text{zero}} = \mathbb{E}\left[\|\hat{f}_{\text{fwd}} + \hat{f}_{\text{rev}}\|_2\right] \tag{6}$$
 >
 > The geometric loss is:
-> $$\mathcal{L}_{\text{geo}} = \mathcal{L}_{\text{fwd}} + \mathcal{L}_{\text{rev}} + \lambda_{\text{rc}}\,\mathcal{L}_{\text{rc}} + \lambda_{\text{zero}}\,\mathcal{L}_{\text{zero}} \tag{8}$$
+> $$\mathcal{L}_{\text{geo}} = \mathcal{L}_{\text{fwd}} + \mathcal{L}_{\text{rev}} + \lambda_{\text{zero}}\,\mathcal{L}_{\text{zero}} \tag{7}$$
 
 ### 第 4 段：Retrieval-Guided Hard Sample Mining
 
@@ -140,7 +136,7 @@
 ### 第 5 段：Training Protocol（简要）
 
 > The total training objective is
-> $$\mathcal{L} = \mathcal{L}_{\text{ret}} + \lambda_{\text{geo}}\,\mathcal{L}_{\text{geo}}. \tag{9}$$
+> $$\mathcal{L} = \mathcal{L}_{\text{ret}} + \lambda_{\text{geo}}\,\mathcal{L}_{\text{geo}}. \tag{8}$$
 > The two branches are optimized **synchronously** with separate optimizers and gradient scalers. To stabilize joint training, we apply a PCGrad-style projection that removes the component of the geometric gradient that directly conflicts with the retrieval gradient on matched text-LoRA parameters. When Shared-B is enabled in shallow layers, the shared $\mathbf{B}$ is updated only by the retrieval branch, while the geometric branch updates only its task-specific $\mathbf{A}$ factors.
 
 ### 对应代码

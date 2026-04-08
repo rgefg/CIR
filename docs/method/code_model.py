@@ -57,9 +57,8 @@ class CLIP(nn.Module):
         将 pseudo-token s* 插入到 text prompt 中 placeholder ('*') 的位置，
         然后通过 text transformer 编码。
 
-        text: tokenized prompt, e.g. a dataset-aligned template
-              such as "a photo of * and {instruction}" (CIRR)
-              or "a photo of * that {instruction}" (CIRCO/FashionIQ)
+        text: tokenized prompt, e.g. the standard Pic2Word-style template
+              "a photo of * that {instruction}"
         img_tokens: [B, d_model]，来自 img2text(encode_image(I_r))
         split_ind: placeholder token id (对应 '*')
         """
