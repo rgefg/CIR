@@ -102,6 +102,17 @@ def _svd_factorize(delta: torch.Tensor, rank: int, out_dtype: torch.dtype) -> Tu
    return a_full.to(dtype=out_dtype), b_full.to(dtype=out_dtype)
 
 
+def _svd_topk_matrix(mat: torch.Tensor, rank_keep: int) -> torch.Tensor:
+   if mat.ndim != 2:
+      raise ValueError(f"_svd_topk_matrix expects 2D tensor, got shape={tuple(mat.shape)}")
+   max_rank = min(mat.shape[0], mat.shape[1])
+   use_r = max(1, min(int(rank_keep), max_rank))
+   if use_r >= max_rank:
+      return mat
+   u, s, vh = torch.linalg.svd(mat, full_matrices=False)
+   return (u[:, :use_r] * s[:use_r].unsqueeze(0)) @ vh[:use_r, :]
+
+
 def main() -> None:
    parser = argparse.ArgumentParser(description="True LoRA merge via TIES on delta weights (B@A), then SVD back to A/B.")
    parser.add_argument("--ckpt-a", type=Path, required=True, help="Checkpoint A path.")
@@ -114,7 +125,7 @@ def main() -> None:
       "--merge-mode",
       type=str,
       default="ties",
-      choices=["ties", "shared_b_sum_a", "hybrid_layerwise", "shared_a_sum_b"],
+      choices=["ties", "shared_b_sum_a", "hybrid_layerwise", "hybrid_layerwise_svd_a", "shared_a_sum_b"],
       help="Use TIES in delta space, or keep base B fixed and sum only A for Shared-B LoRA.",
    )
    parser.add_argument(
@@ -125,6 +136,12 @@ def main() -> None:
       help="When merge-mode=hybrid_layerwise, use Shared-B A-sum for shallow blocks [0, N-1] and TIES for deeper blocks.",
    )
    parser.add_argument("--shared-a-num-layers", dest="shared_b_num_layers", type=int, help=argparse.SUPPRESS)
+   parser.add_argument(
+      "--svd-topk-rank",
+      type=int,
+      default=32,
+      help="For merge-mode=hybrid_layerwise_svd_a, keep top-k singular values of the shallow-layer merged A.",
+   )
    parser.add_argument("--text-only", action="store_true", default=False, help="Merge only text encoder LoRA pairs.")
    parser.add_argument("--all-lora", action="store_true", default=False, help="Merge both text and visual LoRA pairs.")
    parser.add_argument("--base", type=str, default="b", choices=["a", "b"], help="Output structure base checkpoint.")
@@ -230,6 +247,33 @@ def main() -> None:
       merged_AB[kA] = merged_A.to(dtype=out_dtype)
       merged_AB[kB] = b_ref.to(dtype=out_dtype)
 
+   def _write_shared_b_svd_a(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor]):
+      nonlocal shared_b_mismatch_prefixes
+      aA = pa["A"].float()
+      aB = pa["B"].float()
+      bA = pb["A"].float()
+      bB = pb["B"].float()
+      if aB.shape != bB.shape:
+         raise RuntimeError(
+            f"Shared-B SVD-A merge requires matching B shapes for {prefix}: {tuple(aB.shape)} vs {tuple(bB.shape)}"
+         )
+      if not torch.allclose(aB, bB, rtol=1e-4, atol=1e-5):
+         shared_b_mismatch_prefixes += 1
+      b_ref = aB if args.base == "a" else bB
+      coeff_a = weight_a * (scale_a / base_scale)
+      coeff_b = weight_b * (scale_b / base_scale)
+      merged_A = (coeff_a * aA) + (coeff_b * bA)
+      merged_A = _svd_topk_matrix(merged_A, rank_keep=args.svd_topk_rank)
+      out_dtype = pair_b[prefix]["A"].dtype if args.base == "b" else pair_a[prefix]["A"].dtype
+      if args.base == "b":
+         kA = pair_b[prefix].get("A_key", prefix + ".A")
+         kB = pair_b[prefix].get("B_key", prefix + ".B")
+      else:
+         kA = pair_a[prefix].get("A_key", prefix + ".A")
+         kB = pair_a[prefix].get("B_key", prefix + ".B")
+      merged_AB[kA] = merged_A.to(dtype=out_dtype)
+      merged_AB[kB] = b_ref.to(dtype=out_dtype)
+
    def _write_delta_ties(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor]):
       aA = pa["A"].float()
       aB = pa["B"].float()
@@ -268,6 +312,14 @@ def main() -> None:
          else:
             deep_ties_prefixes += 1
             _write_delta_ties(p, pair_a[p], pair_b[p])
+      elif effective_merge_mode == "hybrid_layerwise_svd_a":
+         layer_idx = _text_resblock_index(p)
+         if layer_idx is not None and layer_idx < int(args.shared_b_num_layers):
+            shallow_shared_prefixes += 1
+            _write_shared_b_svd_a(p, pair_a[p], pair_b[p])
+         else:
+            deep_ties_prefixes += 1
+            _write_delta_ties(p, pair_a[p], pair_b[p])
       else:
          _write_delta_ties(p, pair_a[p], pair_b[p])
 
@@ -289,6 +341,11 @@ def main() -> None:
          elif effective_merge_mode == "hybrid_layerwise" and (_text_resblock_index(p) is not None and _text_resblock_index(p) < int(args.shared_b_num_layers)):
             coeff_b = weight_b * (scale_b / base_scale)
             merged_AB[kA] = (coeff_b * bA).to(dtype=out_dtype)
+            merged_AB[kB] = pb["B"].to(dtype=out_dtype)
+         elif effective_merge_mode == "hybrid_layerwise_svd_a" and (_text_resblock_index(p) is not None and _text_resblock_index(p) < int(args.shared_b_num_layers)):
+            coeff_b = weight_b * (scale_b / base_scale)
+            merged_A = _svd_topk_matrix(coeff_b * bA, rank_keep=args.svd_topk_rank)
+            merged_AB[kA] = merged_A.to(dtype=out_dtype)
             merged_AB[kB] = pb["B"].to(dtype=out_dtype)
          else:
             delta_b_eff = scale_b * (bB @ bA)
@@ -348,6 +405,7 @@ def main() -> None:
    print(f"weights: {args.weights}, density: {args.density}, sign: {args.majority_sign_method}")
    print(f"merge_mode: {args.merge_mode}")
    print(f"shared_b_num_layers: {args.shared_b_num_layers}")
+   print(f"svd_topk_rank: {args.svd_topk_rank}")
    print(f"shallow_shared_prefixes: {shallow_shared_prefixes}")
    print(f"deep_ties_prefixes: {deep_ties_prefixes}")
    print(f"shared_b_mismatch_prefixes: {shared_b_mismatch_prefixes}")

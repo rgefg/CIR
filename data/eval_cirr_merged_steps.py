@@ -35,6 +35,9 @@ def parse_args():
     parser.add_argument("--retrieval-weight", type=float, default=0.5)
     parser.add_argument("--geo-weight", type=float, default=0.5)
     parser.add_argument("--density", type=float, default=0.9)
+    parser.add_argument("--merge-mode", type=str, default="ties")
+    parser.add_argument("--shared-b-num-layers", type=int, default=6)
+    parser.add_argument("--svd-topk-rank", type=int, default=32)
     parser.add_argument("--lora-alpha", type=float, default=16.0)
     parser.add_argument("--lora-rank", type=int, default=64)
     parser.add_argument("--min-step", type=int, default=200)
@@ -175,6 +178,9 @@ def main():
             "--output", str(temp_merged),
             "--weights", str(args.retrieval_weight), str(args.geo_weight),
             "--density", str(args.density),
+            "--merge-mode", str(args.merge_mode),
+            "--shared-b-num-layers", str(args.shared_b_num_layers),
+            "--svd-topk-rank", str(args.svd_topk_rank),
             "--text-only",
             "--base", "a",
             "--alpha-a", str(args.lora_alpha),
