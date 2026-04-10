@@ -38,6 +38,12 @@ def parse_args():
     parser.add_argument("--merge-mode", type=str, default="ties")
     parser.add_argument("--shared-b-num-layers", type=int, default=6)
     parser.add_argument("--svd-topk-rank", type=int, default=32)
+    parser.add_argument(
+        "--svd-rescale-mode",
+        type=str,
+        default="none",
+        choices=["none", "dare", "fro"],
+    )
     parser.add_argument("--lora-alpha", type=float, default=16.0)
     parser.add_argument("--lora-rank", type=int, default=64)
     parser.add_argument("--min-step", type=int, default=200)
@@ -141,6 +147,14 @@ def append_record(path: Path, record: dict):
 
 
 def run_subprocess(cmd, env=None):
+    if env is None:
+        env = os.environ.copy()
+    repo_paths = [str(REPO_ROOT), str(REPO_ROOT / "src")]
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = os.pathsep.join(repo_paths + [existing_pythonpath])
+    else:
+        env["PYTHONPATH"] = os.pathsep.join(repo_paths)
     completed = subprocess.run(
         cmd,
         stdout=subprocess.PIPE,
@@ -181,6 +195,7 @@ def main():
             "--merge-mode", str(args.merge_mode),
             "--shared-b-num-layers", str(args.shared_b_num_layers),
             "--svd-topk-rank", str(args.svd_topk_rank),
+            "--svd-rescale-mode", str(args.svd_rescale_mode),
             "--text-only",
             "--base", "a",
             "--alpha-a", str(args.lora_alpha),

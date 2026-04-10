@@ -102,7 +102,7 @@ def _svd_factorize(delta: torch.Tensor, rank: int, out_dtype: torch.dtype) -> Tu
    return a_full.to(dtype=out_dtype), b_full.to(dtype=out_dtype)
 
 
-def _svd_topk_matrix(mat: torch.Tensor, rank_keep: int) -> torch.Tensor:
+def _svd_topk_matrix(mat: torch.Tensor, rank_keep: int, rescale_mode: str = "none") -> torch.Tensor:
    if mat.ndim != 2:
       raise ValueError(f"_svd_topk_matrix expects 2D tensor, got shape={tuple(mat.shape)}")
    max_rank = min(mat.shape[0], mat.shape[1])
@@ -110,7 +110,17 @@ def _svd_topk_matrix(mat: torch.Tensor, rank_keep: int) -> torch.Tensor:
    if use_r >= max_rank:
       return mat
    u, s, vh = torch.linalg.svd(mat, full_matrices=False)
-   return (u[:, :use_r] * s[:use_r].unsqueeze(0)) @ vh[:use_r, :]
+   truncated = (u[:, :use_r] * s[:use_r].unsqueeze(0)) @ vh[:use_r, :]
+   if rescale_mode == "none":
+      return truncated
+   if rescale_mode == "dare":
+      keep_ratio = float(use_r) / float(max_rank)
+      return truncated / keep_ratio
+   if rescale_mode == "fro":
+      src_norm = mat.norm()
+      trunc_norm = truncated.norm().clamp_min(1e-12)
+      return truncated * (src_norm / trunc_norm)
+   raise ValueError(f"Unsupported svd rescale mode: {rescale_mode}")
 
 
 def main() -> None:
@@ -141,6 +151,13 @@ def main() -> None:
       type=int,
       default=32,
       help="For merge-mode=hybrid_layerwise_svd_a, keep top-k singular values of the shallow-layer merged A.",
+   )
+   parser.add_argument(
+      "--svd-rescale-mode",
+      type=str,
+      default="none",
+      choices=["none", "dare", "fro"],
+      help="Optional rescaling after SVD-topk on shallow merged A. 'dare' rescales by 1/keep_ratio.",
    )
    parser.add_argument("--text-only", action="store_true", default=False, help="Merge only text encoder LoRA pairs.")
    parser.add_argument("--all-lora", action="store_true", default=False, help="Merge both text and visual LoRA pairs.")
@@ -263,7 +280,11 @@ def main() -> None:
       coeff_a = weight_a * (scale_a / base_scale)
       coeff_b = weight_b * (scale_b / base_scale)
       merged_A = (coeff_a * aA) + (coeff_b * bA)
-      merged_A = _svd_topk_matrix(merged_A, rank_keep=args.svd_topk_rank)
+      merged_A = _svd_topk_matrix(
+         merged_A,
+         rank_keep=args.svd_topk_rank,
+         rescale_mode=args.svd_rescale_mode,
+      )
       out_dtype = pair_b[prefix]["A"].dtype if args.base == "b" else pair_a[prefix]["A"].dtype
       if args.base == "b":
          kA = pair_b[prefix].get("A_key", prefix + ".A")
@@ -344,7 +365,11 @@ def main() -> None:
             merged_AB[kB] = pb["B"].to(dtype=out_dtype)
          elif effective_merge_mode == "hybrid_layerwise_svd_a" and (_text_resblock_index(p) is not None and _text_resblock_index(p) < int(args.shared_b_num_layers)):
             coeff_b = weight_b * (scale_b / base_scale)
-            merged_A = _svd_topk_matrix(coeff_b * bA, rank_keep=args.svd_topk_rank)
+            merged_A = _svd_topk_matrix(
+               coeff_b * bA,
+               rank_keep=args.svd_topk_rank,
+               rescale_mode=args.svd_rescale_mode,
+            )
             merged_AB[kA] = merged_A.to(dtype=out_dtype)
             merged_AB[kB] = pb["B"].to(dtype=out_dtype)
          else:
@@ -406,6 +431,7 @@ def main() -> None:
    print(f"merge_mode: {args.merge_mode}")
    print(f"shared_b_num_layers: {args.shared_b_num_layers}")
    print(f"svd_topk_rank: {args.svd_topk_rank}")
+   print(f"svd_rescale_mode: {args.svd_rescale_mode}")
    print(f"shallow_shared_prefixes: {shallow_shared_prefixes}")
    print(f"deep_ties_prefixes: {deep_ties_prefixes}")
    print(f"shared_b_mismatch_prefixes: {shared_b_mismatch_prefixes}")
