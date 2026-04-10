@@ -102,7 +102,7 @@ def _svd_factorize(delta: torch.Tensor, rank: int, out_dtype: torch.dtype) -> Tu
    return a_full.to(dtype=out_dtype), b_full.to(dtype=out_dtype)
 
 
-def _svd_topk_matrix(mat: torch.Tensor, rank_keep: int, rescale_mode: str = "none") -> torch.Tensor:
+def _svd_topk_matrix(mat: torch.Tensor, rank_keep: int, rescale: bool = False) -> torch.Tensor:
    if mat.ndim != 2:
       raise ValueError(f"_svd_topk_matrix expects 2D tensor, got shape={tuple(mat.shape)}")
    max_rank = min(mat.shape[0], mat.shape[1])
@@ -111,16 +111,12 @@ def _svd_topk_matrix(mat: torch.Tensor, rank_keep: int, rescale_mode: str = "non
       return mat
    u, s, vh = torch.linalg.svd(mat, full_matrices=False)
    truncated = (u[:, :use_r] * s[:use_r].unsqueeze(0)) @ vh[:use_r, :]
-   if rescale_mode == "none":
+   if not rescale:
       return truncated
-   if rescale_mode == "dare":
-      keep_ratio = float(use_r) / float(max_rank)
-      return truncated / keep_ratio
-   if rescale_mode == "fro":
-      src_norm = mat.norm()
-      trunc_norm = truncated.norm().clamp_min(1e-12)
-      return truncated * (src_norm / trunc_norm)
-   raise ValueError(f"Unsupported svd rescale mode: {rescale_mode}")
+   keep_ratio = float(use_r) / float(max_rank)
+   if keep_ratio <= 0.0:
+      return truncated
+   return truncated / keep_ratio
 
 
 def main() -> None:
@@ -153,11 +149,10 @@ def main() -> None:
       help="For merge-mode=hybrid_layerwise_svd_a, keep top-k singular values of the shallow-layer merged A.",
    )
    parser.add_argument(
-      "--svd-rescale-mode",
-      type=str,
-      default="none",
-      choices=["none", "dare", "fro"],
-      help="Optional rescaling after SVD-topk on shallow merged A. 'dare' rescales by 1/keep_ratio.",
+      "--svd-rescale",
+      action="store_true",
+      default=False,
+      help="Rescale the truncated shallow-layer merged A by 1 / keep_ratio after SVD-topk.",
    )
    parser.add_argument("--text-only", action="store_true", default=False, help="Merge only text encoder LoRA pairs.")
    parser.add_argument("--all-lora", action="store_true", default=False, help="Merge both text and visual LoRA pairs.")
@@ -283,7 +278,7 @@ def main() -> None:
       merged_A = _svd_topk_matrix(
          merged_A,
          rank_keep=args.svd_topk_rank,
-         rescale_mode=args.svd_rescale_mode,
+         rescale=args.svd_rescale,
       )
       out_dtype = pair_b[prefix]["A"].dtype if args.base == "b" else pair_a[prefix]["A"].dtype
       if args.base == "b":
@@ -368,7 +363,7 @@ def main() -> None:
             merged_A = _svd_topk_matrix(
                coeff_b * bA,
                rank_keep=args.svd_topk_rank,
-               rescale_mode=args.svd_rescale_mode,
+               rescale=args.svd_rescale,
             )
             merged_AB[kA] = merged_A.to(dtype=out_dtype)
             merged_AB[kB] = pb["B"].to(dtype=out_dtype)
@@ -431,7 +426,7 @@ def main() -> None:
    print(f"merge_mode: {args.merge_mode}")
    print(f"shared_b_num_layers: {args.shared_b_num_layers}")
    print(f"svd_topk_rank: {args.svd_topk_rank}")
-   print(f"svd_rescale_mode: {args.svd_rescale_mode}")
+   print(f"svd_rescale: {args.svd_rescale}")
    print(f"shallow_shared_prefixes: {shallow_shared_prefixes}")
    print(f"deep_ties_prefixes: {deep_ties_prefixes}")
    print(f"shared_b_mismatch_prefixes: {shared_b_mismatch_prefixes}")
