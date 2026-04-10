@@ -131,7 +131,7 @@ def main() -> None:
       "--merge-mode",
       type=str,
       default="ties",
-      choices=["ties", "shared_b_sum_a", "hybrid_layerwise", "hybrid_layerwise_svd_a", "shared_a_sum_b"],
+      choices=["ties", "shared_b_sum_a", "shared_b_svd_a", "hybrid_layerwise", "hybrid_layerwise_svd_a", "shared_a_sum_b"],
       help="Use TIES in delta space, or keep base B fixed and sum only A for Shared-B LoRA.",
    )
    parser.add_argument(
@@ -320,6 +320,8 @@ def main() -> None:
       effective_merge_mode = "shared_b_sum_a" if args.merge_mode == "shared_a_sum_b" else args.merge_mode
       if effective_merge_mode == "shared_b_sum_a":
          _write_shared_b_sum(p, pair_a[p], pair_b[p])
+      elif effective_merge_mode == "shared_b_svd_a":
+         _write_shared_b_svd_a(p, pair_a[p], pair_b[p])
       elif effective_merge_mode == "hybrid_layerwise":
          layer_idx = _text_resblock_index(p)
          if layer_idx is not None and layer_idx < int(args.shared_b_num_layers):
@@ -353,6 +355,15 @@ def main() -> None:
          if effective_merge_mode == "shared_b_sum_a":
             coeff_b = weight_b * (scale_b / base_scale)
             merged_AB[kA] = (coeff_b * bA).to(dtype=out_dtype)
+            merged_AB[kB] = pb["B"].to(dtype=out_dtype)
+         elif effective_merge_mode == "shared_b_svd_a":
+            coeff_b = weight_b * (scale_b / base_scale)
+            merged_A = _svd_topk_matrix(
+               coeff_b * bA,
+               rank_keep=args.svd_topk_rank,
+               rescale=args.svd_rescale,
+            )
+            merged_AB[kA] = merged_A.to(dtype=out_dtype)
             merged_AB[kB] = pb["B"].to(dtype=out_dtype)
          elif effective_merge_mode == "hybrid_layerwise" and (_text_resblock_index(p) is not None and _text_resblock_index(p) < int(args.shared_b_num_layers)):
             coeff_b = weight_b * (scale_b / base_scale)
