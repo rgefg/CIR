@@ -51,6 +51,7 @@ def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
+    args.use_image_anchor = False
     sample_pack_text = collect_real_samples(args)
     model, img2text = build_retrieval_model(args, ckpt_path=args.checkpoint)
 
