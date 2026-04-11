@@ -66,3 +66,105 @@ Experiment setup:
 - If the story is about **subset discrimination under full Shared-B**, `R_subset@1` is the strongest supporting metric: it improves steadily from `63.29` (`l0`) to `66.08` (`l12`).
 - If the story is about an **increase-then-decrease trend**, `R@10` is the cleanest metric: `74.41 -> 74.81 -> 74.93 -> 74.98 -> 74.93 -> 74.89 -> 74.79`, peaking at `l6`.
 - `R@1`, `R@50`, and `R_subset@1` do not support a half-split-best story for `ViT-L`; they prefer deeper or full Shared-B.
+
+## Real-Sample Geometry Probes
+
+All text-geometry probes below use real CC3M-CIR samples and compare:
+
+- `Pic2Word`:
+  - `checkpoint/pic2word_model.pt`
+  - `ViT-L/14`
+  - `IM2TEXT`
+- `Ours`:
+  - `ViT-B/32 + SEARLE Phi`
+  - merged `step1400` plain `TIES`
+
+### 2048-Sample Text-Anchor Probe
+
+Definition:
+
+- `compose->target = cos(E(src-caption + instruction), E(target-caption))`
+- `delta->forward = cos(norm(E(target)-E(src)), E(forward-instruction))`
+- `reverse-delta->reverse = cos(norm(E(src)-E(target)), E(reverse-instruction))`
+
+Key results:
+
+| Model | compose->target | delta->forward | reverse-delta->reverse |
+|---|---:|---:|---:|
+| Pic2Word | 0.8442 | 0.0207 | 0.0570 |
+| Ours retrieval | 0.9001 | 0.3102 | 0.1303 |
+| Ours geo | 0.7021 | 0.5098 | 0.3499 |
+| Ours merged | 0.8734 | 0.1639 | 0.1298 |
+
+Takeaway:
+
+- On pure text-caption differences, `Pic2Word` shows almost no edit-direction alignment.
+- Our `geo` branch clearly learns caption-difference / instruction geometry.
+- Our merged model keeps part of this effect, but is weaker than the pure `geo` branch.
+
+### 2048-Sample Image-Anchor Probe
+
+Definition:
+
+- replace the source caption with the actual image anchor `f_v -> f_phi -> "a photo of *"`
+- then measure the same direction/instruction similarities
+
+Key results:
+
+| Model | compose->target | delta->forward | reverse-delta->reverse |
+|---|---:|---:|---:|
+| Pic2Word | 0.5461 | 0.4224 | -0.4013 |
+| Ours retrieval | 0.7697 | 0.3713 | -0.1757 |
+| Ours merged | 0.7343 | 0.2009 | -0.0582 |
+
+Takeaway:
+
+- This probe alone does **not** cleanly prove that Pic2Word is weaker than our merged model on image-conditioned edit geometry.
+- Pic2Word still has strong forward-direction correlation under the image anchor.
+- So the 2048-sample image-anchor probe is not enough to support the intended story by itself.
+
+## 16-Sample Instruction-Sensitivity Probe
+
+To isolate whether a model really uses the instruction semantics, we keep the same image anchor and target caption, then compare:
+
+- original instruction
+- masked-content instruction: content words replaced by `something`
+- swapped instruction: instruction taken from another sample
+
+Results:
+
+| Model | mean cos original | mean cos masked | mean cos swapped | drop(original->masked) | drop(original->swapped) |
+|---|---:|---:|---:|---:|---:|
+| Pic2Word | 0.5328 | 0.2986 | 0.3417 | 0.2341 | 0.1911 |
+| Ours merged | 0.7321 | 0.4692 | 0.3002 | 0.2629 | 0.4319 |
+
+Relative drops:
+
+- Pic2Word:
+  - masked: `43.95%`
+  - swapped: `35.87%`
+- Ours merged:
+  - masked: `35.91%`
+  - swapped: `58.99%`
+
+Takeaway:
+
+- Both models react when content words are masked.
+- But our merged model is much more sensitive to **semantic mismatch** (`swapped` instruction), with a much larger drop than Pic2Word.
+- This is the cleaner toy-level evidence that our merged model uses the instruction more compositionally, while Pic2Word is less responsive to instruction replacement.
+
+### Writing Guidance
+
+If the paper story is:
+
+- "Pic2Word does not explicitly learn edit geometry, while our model does,"
+
+then the strongest support is the combination:
+
+1. 2048-sample text-anchor probe:
+   - Pic2Word has near-zero `delta->forward`
+   - our `geo` / merged branches show non-trivial direction alignment
+2. 16-sample instruction-sensitivity probe:
+   - our merged model drops much more under swapped instructions
+
+The 2048-sample image-anchor probe alone should **not** be used as the sole evidence, because it is mixed and does not cleanly separate Pic2Word from our merged model.
