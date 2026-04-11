@@ -152,8 +152,8 @@ def build_retrieval_model(args, ckpt_path=None):
         if "state_dict_img2text" in ckpt and ckpt["state_dict_img2text"] is not None:
             img2text.load_state_dict(strip_module_prefix(ckpt["state_dict_img2text"]), strict=False)
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
-    model = model.to(device).eval()
-    img2text = img2text.to(device).eval()
+    model = model.to(device).float().eval()
+    img2text = img2text.to(device).float().eval()
     return model, img2text
 
 
@@ -175,7 +175,7 @@ def build_geo_model(args, retrieval_ckpt_path):
     ckpt = safe_torch_load(retrieval_ckpt_path, map_location="cpu")
     geo_model.load_state_dict(strip_module_prefix(ckpt["state_dict_geo_text"]), strict=False)
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
-    geo_model = geo_model.to(device).eval()
+    geo_model = geo_model.to(device).float().eval()
     return geo_model
 
 
