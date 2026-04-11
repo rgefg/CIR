@@ -36,3 +36,33 @@ Comparison target:
 - Subset retrieval (`R_subset@1/R_subset@2/R_subset@3`) peaks at `4` shallow layers.
 - The half-split setting (`6`) is strong on subset metrics, but not the best point overall.
 - Moving too deep into non-shared layers (`8/10/12`) causes a clear drop.
+
+## ViT-L Step1400 Results
+
+All results below use the same `step1400` checkpoint pair from:
+
+- retrieval: `epoch_0_step_1400.pt`
+- geo: `epoch_0_step_1400_geo_lora_ema.pt`
+
+Experiment setup:
+
+- `ViT-L/14 + SEARLE Phi`
+- `Shared-B` enabled for all 12 layers during training
+- `geo` loss uses `fwd + rev + zero` (no reverse-consistency term)
+- merge-time ablation varies how many shallow layers use `SVD-denoise(A)` before deep-layer `TIES`
+
+| Shallow layers | Merge rule | R@1 | R@5 | R@10 | R@50 | R_subset@1 | R_subset@2 | R_subset@3 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 0 | plain TIES | 30.47 | 62.62 | 74.41 | 92.01 | 63.29 | 83.21 | 91.65 |
+| 2 | shallow SVD-denoise, deep TIES | 31.43 | 62.71 | 74.81 | 92.27 | 64.46 | 83.62 | 92.04 |
+| 4 | shallow SVD-denoise, deep TIES | 31.69 | 62.86 | 74.93 | 92.32 | 64.98 | 83.47 | 91.99 |
+| 6 | shallow SVD-denoise, deep TIES | 31.79 | 63.19 | 74.98 | 92.23 | 64.65 | 83.50 | 92.13 |
+| 8 | shallow SVD-denoise, deep TIES | 31.60 | 63.19 | 74.93 | 92.27 | 64.84 | 83.59 | 91.99 |
+| 10 | shallow SVD-denoise, deep TIES | 31.86 | 62.90 | 74.89 | 92.37 | 65.25 | 83.52 | 92.08 |
+| 12 | full-layer SVD-denoise | 31.98 | 62.90 | 74.79 | 92.39 | 66.08 | 83.76 | 91.96 |
+
+### ViT-L Takeaways
+
+- If the story is about **subset discrimination under full Shared-B**, `R_subset@1` is the strongest supporting metric: it improves steadily from `63.29` (`l0`) to `66.08` (`l12`).
+- If the story is about an **increase-then-decrease trend**, `R@10` is the cleanest metric: `74.41 -> 74.81 -> 74.93 -> 74.98 -> 74.93 -> 74.89 -> 74.79`, peaking at `l6`.
+- `R@1`, `R@50`, and `R_subset@1` do not support a half-split-best story for `ViT-L`; they prefer deeper or full Shared-B.

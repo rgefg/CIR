@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="/data2/mingyu/composed_image_retrieval"
+
+MODEL_NAME="ViT-L/14" \
+OPENAI_PRETRAINED="1" \
+PIC2WORD_CKPT="" \
+IMG2TEXT_ARCH="phi" \
+IMG2TEXT_PRETRAINED="/data2/mingyu/.cache/torch/hub/checkpoints/SEARLE_ViT-L14.pt" \
+MIDDLE_DIM="3072" \
+RETRIEVAL_PROMPT_CONNECTOR="that" \
+TRAIN_CUDA_DEVICES="4,5" \
+DIST_URL="tcp://127.0.0.1:6214" \
+RUN_NAME="DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTL14_SEARLEPhi_That_Drop0p5_SharedB12_NoRev_CIRCO_GeneCIS_MergeCmp" \
+TRAIN_BATCH_SIZE="56" \
+TRAIN_ACCUM_STEPS="8" \
+LR="2e-5" \
+GEO_LR="2e-5" \
+INSTRUCTION_DROPOUT_PROB="0.5" \
+TRAIN_EPOCH_STEPS="1400" \
+SAVE_STEP_START="1400" \
+SAVE_STEP_END="1400" \
+SAVE_STEP_INTERVAL="200" \
+SHARED_B_LORA="1" \
+SHARED_B_NUM_LAYERS="12" \
+SHARED_B_RETRIEVAL_ONLY_UPDATE="1" \
+GEO_REVERSE_WEIGHT="0.0" \
+GEO_ZERO_LOSS_WEIGHT="1.0" \
+RUN_POSTHOC_MERGED_EVAL="0" \
+RUN_POSTHOC_SECOND_MERGED_EVAL="0" \
+RUN_POSTHOC_CIRR_EVAL="0" \
+MULTIDATASET_EVAL_EVERY="0" \
+CIRR_VAL_EVAL_EVERY="0" \
+bash "${ROOT}/train_with_dropout.sh"
+
+bash "${ROOT}/run_vitl14_sharedb12_step1400_circo_ablation_serial.sh" 4 &
+PID_CIRCO=$!
+bash "${ROOT}/run_vitl14_sharedb12_step1400_genecis_ablation_serial.sh" 5 &
+PID_GENECIS=$!
+wait "${PID_CIRCO}" "${PID_GENECIS}"
