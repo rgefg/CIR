@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 from data import get_cc3m_cir_wds
 from main import TextEncoderBranch, apply_lora_to_linear_layers
 from model.clip import load as load_clip
-from model.model import Phi
+from model.model import IM2TEXT, Phi
 from third_party.open_clip.clip import tokenize
 
 
@@ -145,6 +145,14 @@ def build_img2text(base_model, args):
             hidden_dim=args.middle_dim,
             output_dim=base_model.token_embedding.weight.shape[1],
             dropout=0.5,
+        )
+    if args.img2text_arch == "im2text":
+        return IM2TEXT(
+            embed_dim=base_model.embed_dim,
+            middle_dim=args.middle_dim,
+            output_dim=base_model.token_embedding.weight.shape[1],
+            n_layer=args.n_layer,
+            dropout=0.1,
         )
     raise ValueError(f"Unsupported img2text_arch: {args.img2text_arch}")
 
