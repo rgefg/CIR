@@ -42,6 +42,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=3407)
+    parser.add_argument("--retrieval-prompt-connector", type=str, default="and")
     parser.add_argument("--wds-shards", type=str, required=True)
     parser.add_argument("--cc3m-cir-jsonl", type=str, required=True)
     parser.add_argument("--wds-image-key", type=str, default="jpg;png;jpeg;webp")
@@ -50,6 +51,7 @@ def parse_args():
     parser.add_argument("--wds-shardshuffle", type=int, default=1000)
     parser.add_argument("--wds-resampled", action="store_true", default=True)
     parser.add_argument("--wds-deterministic", action="store_true", default=True)
+    parser.add_argument("--use-image-anchor", action="store_true", default=False)
     return parser.parse_args()
 
 
@@ -98,15 +100,21 @@ def tiny_preprocess(_img):
 
 def collect_real_samples(args):
     data_args = build_data_args(args)
-    dataloader = get_cc3m_cir_wds(data_args, tiny_preprocess, is_train=True).dataloader
+    preprocess = tiny_preprocess
+    if args.use_image_anchor:
+        _, _, preprocess = load_clip(args.model, jit=False)
+    dataloader = get_cc3m_cir_wds(data_args, preprocess, is_train=True).dataloader
     iterator = iter(dataloader)
     src, tgt, fwd, rev = [], [], [], []
+    imgs = []
     while len(src) < args.num_samples:
         batch = next(iterator)
         src.extend([str(x) for x in batch["src_caption"]])
         tgt.extend([str(x) for x in batch["modified_caption"]])
         fwd.extend([str(x) for x in batch["instruction"]])
         rev.extend([str(x) for x in batch["reverse_instruction"]])
+        if args.use_image_anchor:
+            imgs.append(batch["ref_img"].half().cpu())
     src = src[: args.num_samples]
     tgt = tgt[: args.num_samples]
     fwd = fwd[: args.num_samples]
@@ -115,7 +123,7 @@ def collect_real_samples(args):
         i for i, (s, t, fi, ri) in enumerate(zip(src, tgt, fwd, rev))
         if s.strip() and t.strip() and fi.strip() and ri.strip()
     ]
-    return {
+    out = {
         "src": [src[i] for i in valid],
         "tgt": [tgt[i] for i in valid],
         "fwd": [fwd[i] for i in valid],
@@ -123,6 +131,11 @@ def collect_real_samples(args):
         "requested_num_samples": args.num_samples,
         "valid_num_samples": len(valid),
     }
+    if args.use_image_anchor:
+        all_imgs = torch.cat(imgs, dim=0)[: args.num_samples]
+        valid_idx = torch.as_tensor(valid, dtype=torch.long)
+        out["images"] = all_imgs.index_select(0, valid_idx)
+    return out
 
 
 def build_img2text(base_model, args):
@@ -225,6 +238,60 @@ def compute_stats(name, text_encoder, sample_pack, gpu):
     return name, metrics
 
 
+@torch.no_grad()
+def encode_image_anchor_query(model, img2text, images_cpu, prompts, gpu):
+    device = torch.device(f"cuda:{gpu}" if torch.cuda.is_available() else "cpu")
+    placeholder_token_id = int(tokenize(["*"])[0][1].item())
+    outs = []
+    for start in range(0, len(prompts), 128):
+        batch_prompts = prompts[start:start + 128]
+        batch_images = images_cpu[start:start + 128].to(device=device, dtype=torch.float32, non_blocking=True)
+        image_features = model.encode_image(batch_images)
+        token_features = img2text(image_features)
+        text_tokens = tokenize(batch_prompts, truncate=True).to(device)
+        feats = model.encode_text_img_vis(text_tokens, token_features, split_ind=placeholder_token_id)
+        feats = feats / feats.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        outs.append(feats.float().cpu())
+    return torch.cat(outs, dim=0)
+
+
+def compute_image_anchor_stats(name, model, img2text, sample_pack, gpu, connector):
+    src = sample_pack["src"]
+    tgt = sample_pack["tgt"]
+    fwd = sample_pack["fwd"]
+    rev = sample_pack["rev"]
+    images = sample_pack["images"]
+
+    target_feats = encode_texts(model, tgt, gpu)
+    fwd_feats = encode_texts(model, fwd, gpu)
+    rev_feats = encode_texts(model, rev, gpu)
+
+    anchor_prompts = ["a photo of *"] * len(tgt)
+    composed_prompts = [f"a photo of * {connector} {ins}" for ins in fwd]
+
+    anchor_feats = encode_image_anchor_query(model, img2text, images, anchor_prompts, gpu)
+    composed_feats = encode_image_anchor_query(model, img2text, images, composed_prompts, gpu)
+
+    delta_fwd = target_feats - anchor_feats
+    delta_fwd = delta_fwd / delta_fwd.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    delta_rev = anchor_feats - target_feats
+    delta_rev = delta_rev / delta_rev.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    add_fwd = anchor_feats + fwd_feats
+    add_fwd = add_fwd / add_fwd.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
+    metrics = {
+        "mean_cos_compose_to_target": float((composed_feats * target_feats).sum(dim=-1).mean().item()),
+        "mean_cos_delta_to_forward_instruction": float((delta_fwd * fwd_feats).sum(dim=-1).mean().item()),
+        "mean_cos_reverse_delta_to_reverse_instruction": float((delta_rev * rev_feats).sum(dim=-1).mean().item()),
+        "mean_cos_additive_to_target": float((add_fwd * target_feats).sum(dim=-1).mean().item()),
+        "std_cos_compose_to_target": float((composed_feats * target_feats).sum(dim=-1).std(unbiased=False).item()),
+        "std_cos_delta_to_forward_instruction": float((delta_fwd * fwd_feats).sum(dim=-1).std(unbiased=False).item()),
+        "std_cos_reverse_delta_to_reverse_instruction": float((delta_rev * rev_feats).sum(dim=-1).std(unbiased=False).item()),
+        "std_cos_additive_to_target": float((add_fwd * target_feats).sum(dim=-1).std(unbiased=False).item()),
+    }
+    return name, metrics
+
+
 def main():
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -233,9 +300,9 @@ def main():
     sample_pack = collect_real_samples(args)
     logging.info("Collected %d valid real samples", sample_pack["valid_num_samples"])
 
-    pretrained_model, _ = build_retrieval_model(args, ckpt_path=None)
-    retrieval_model, _ = build_retrieval_model(args, ckpt_path=args.retrieval_ckpt)
-    merged_model, _ = build_retrieval_model(args, ckpt_path=args.merged_ckpt)
+    pretrained_model, pretrained_img2text = build_retrieval_model(args, ckpt_path=None)
+    retrieval_model, retrieval_img2text = build_retrieval_model(args, ckpt_path=args.retrieval_ckpt)
+    merged_model, merged_img2text = build_retrieval_model(args, ckpt_path=args.merged_ckpt)
     geo_model = build_geo_model(args, args.retrieval_ckpt)
 
     results = {
@@ -245,6 +312,8 @@ def main():
             "model": args.model,
             "retrieval_ckpt": args.retrieval_ckpt,
             "merged_ckpt": args.merged_ckpt,
+            "retrieval_prompt_connector": args.retrieval_prompt_connector,
+            "use_image_anchor": bool(args.use_image_anchor),
         }
     }
 
@@ -257,6 +326,24 @@ def main():
         logging.info("Computing stats for %s", name)
         key, metrics = compute_stats(name, text_encoder, sample_pack, args.gpu)
         results[key] = metrics
+
+    if args.use_image_anchor:
+        image_anchor_results = {}
+        for name, model_obj, img2text_obj in (
+            ("retrieval_branch", retrieval_model, retrieval_img2text),
+            ("merged_ties", merged_model, merged_img2text),
+        ):
+            logging.info("Computing image-anchor stats for %s", name)
+            key, metrics = compute_image_anchor_stats(
+                name,
+                model_obj,
+                img2text_obj,
+                sample_pack,
+                args.gpu,
+                args.retrieval_prompt_connector,
+            )
+            image_anchor_results[key] = metrics
+        results["image_anchor_stats"] = image_anchor_results
 
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
