@@ -5,6 +5,8 @@ import re
 import sys
 from pathlib import Path
 
+import torch
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -72,6 +74,25 @@ def build_prompts(instructions, connector):
     return original, masked, swapped, swapped_ins
 
 
+def summarize_retrieval(query_feats, target_feats):
+    sim = query_feats @ target_feats.t()
+    n = sim.shape[0]
+    diag = sim.diag()
+    eye = torch.eye(n, dtype=torch.bool)
+    neg = sim.masked_fill(eye, float("-inf"))
+    hard_neg, _ = neg.max(dim=1)
+    mean_neg = sim.masked_fill(eye, 0.0).sum(dim=1) / max(n - 1, 1)
+    top1 = (sim.argmax(dim=1) == torch.arange(n)).float().mean()
+    return {
+        "mean_true_cos": float(diag.mean().item()),
+        "mean_hard_negative_cos": float(hard_neg.mean().item()),
+        "mean_negative_cos": float(mean_neg.mean().item()),
+        "mean_margin_to_mean_negative": float((diag - mean_neg).mean().item()),
+        "mean_margin_to_hard_negative": float((diag - hard_neg).mean().item()),
+        "top1_acc": float(top1.item()),
+    }
+
+
 def evaluate_model(name, model, img2text, sample_pack, gpu, connector):
     images = sample_pack["images"]
     target_feats = encode_texts(model, sample_pack["tgt"], gpu)
@@ -85,12 +106,27 @@ def evaluate_model(name, model, img2text, sample_pack, gpu, connector):
     cos_mask = (q_mask * target_feats).sum(dim=-1)
     cos_swap = (q_swap * target_feats).sum(dim=-1)
 
+    stats_orig = summarize_retrieval(q_orig, target_feats)
+    stats_mask = summarize_retrieval(q_mask, target_feats)
+    stats_swap = summarize_retrieval(q_swap, target_feats)
+
     return {
         "mean_cos_original": float(cos_orig.mean().item()),
         "mean_cos_masked": float(cos_mask.mean().item()),
         "mean_cos_swapped": float(cos_swap.mean().item()),
         "mean_drop_original_to_masked": float((cos_orig - cos_mask).mean().item()),
         "mean_drop_original_to_swapped": float((cos_orig - cos_swap).mean().item()),
+        "retrieval_original": stats_orig,
+        "retrieval_masked": stats_mask,
+        "retrieval_swapped": stats_swap,
+        "margin_drop_original_to_masked": float(
+            stats_orig["mean_margin_to_mean_negative"] - stats_mask["mean_margin_to_mean_negative"]
+        ),
+        "margin_drop_original_to_swapped": float(
+            stats_orig["mean_margin_to_mean_negative"] - stats_swap["mean_margin_to_mean_negative"]
+        ),
+        "top1_drop_original_to_masked": float(stats_orig["top1_acc"] - stats_mask["top1_acc"]),
+        "top1_drop_original_to_swapped": float(stats_orig["top1_acc"] - stats_swap["top1_acc"]),
         "samples": [
             {
                 "target": sample_pack["tgt"][i],
@@ -174,6 +210,10 @@ def main():
         ours_args,
         ckpt_path="/tmp/vitb_sharedb_cirr_step1400_ties_realstats.pt",
     )
+    ours_retrieval_model, ours_retrieval_img2text = build_retrieval_model(
+        ours_args,
+        ckpt_path=str(ROOT / "logs" / "DistillCIR_ParallelDualLoRA_BS256_Accum2_ViTB32_SEARLEPhi_And_NoDrop_SharedB_CIRR_MergeCmp" / "checkpoints" / "epoch_0_step_1400.pt"),
+    )
 
     if pic_samples["src"] != ours_samples["src"] or pic_samples["fwd"] != ours_samples["fwd"] or pic_samples["tgt"] != ours_samples["tgt"]:
         raise RuntimeError("Pic2Word and ours toy samples diverged; sample order must match for fair comparison.")
@@ -185,6 +225,7 @@ def main():
             "ours_connector": "and",
         },
         "pic2word_vitl14": evaluate_model("pic2word_vitl14", pic_model, pic_img2text, pic_samples, args.gpu, "that"),
+        "ours_retrieval_vitb32": evaluate_model("ours_retrieval_vitb32", ours_retrieval_model, ours_retrieval_img2text, ours_samples, args.gpu, "and"),
         "ours_merged_vitb32": evaluate_model("ours_merged_vitb32", ours_model, ours_img2text, ours_samples, args.gpu, "and"),
     }
 

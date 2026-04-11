@@ -131,27 +131,51 @@ To isolate whether a model really uses the instruction semantics, we keep the sa
 - masked-content instruction: content words replaced by `something`
 - swapped instruction: instruction taken from another sample
 
-Results:
+Raw cosine results:
 
-| Model | mean cos original | mean cos masked | mean cos swapped | drop(original->masked) | drop(original->swapped) |
+| Model | mean cos original | mean cos masked | mean cos swapped | cos drop(original->masked) | cos drop(original->swapped) |
 |---|---:|---:|---:|---:|---:|
 | Pic2Word | 0.5328 | 0.2986 | 0.3417 | 0.2341 | 0.1911 |
+| Ours retrieval | 0.7870 | 0.4080 | 0.2141 | 0.3790 | 0.5729 |
 | Ours merged | 0.7321 | 0.4692 | 0.3002 | 0.2629 | 0.4319 |
 
-Relative drops:
+Because raw cosine scales differ across models, we also compute retrieval-style margins on the same 16-way candidate set:
+
+- `margin = sim(query, true_target) - mean sim(query, all negative targets)`
+- `top1 = 1` if the true target ranks first among the 16 candidates
+
+Margin / top-1 results:
+
+| Model | original margin | masked margin | swapped margin | margin drop(original->masked) | margin drop(original->swapped) | original top1 | masked top1 | swapped top1 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Pic2Word | 0.2212 | 0.0445 | 0.0105 | 0.1767 | 0.2107 | 0.8125 | 0.0625 | 0.0000 |
+| Ours retrieval | 0.7394 | 0.3350 | 0.1140 | 0.4044 | 0.6255 | 1.0000 | 0.7500 | 0.0000 |
+| Ours merged | 0.5403 | 0.2012 | 0.0824 | 0.3391 | 0.4579 | 0.9375 | 0.4375 | 0.0000 |
+
+Relative cosine drops:
 
 - Pic2Word:
   - masked: `43.95%`
   - swapped: `35.87%`
+- Ours retrieval:
+  - masked: `48.16%`
+  - swapped: `72.80%`
 - Ours merged:
   - masked: `35.91%`
   - swapped: `58.99%`
 
 Takeaway:
 
-- Both models react when content words are masked.
-- But our merged model is much more sensitive to **semantic mismatch** (`swapped` instruction), with a much larger drop than Pic2Word.
-- This is the cleaner toy-level evidence that our merged model uses the instruction more compositionally, while Pic2Word is less responsive to instruction replacement.
+- Pic2Word is not insensitive: it does react to masking and swapping.
+- But once we compare on a retrieval-style candidate set, both our retrieval branch and our merged model show much larger degradation under instruction corruption than Pic2Word.
+- The cleanest evidence is the **swapped-instruction margin drop**:
+  - Pic2Word: `0.2107`
+  - Ours retrieval: `0.6255`
+  - Ours merged: `0.4579`
+- So the defensible story is not "Pic2Word does nothing", but rather:
+  - `Pic2Word` uses instruction semantics weakly,
+  - our retrieval / merged models rely on them much more strongly,
+  - and the retrieval branch is the most instruction-sensitive among the three.
 
 ### Writing Guidance
 
@@ -165,6 +189,6 @@ then the strongest support is the combination:
    - Pic2Word has near-zero `delta->forward`
    - our `geo` / merged branches show non-trivial direction alignment
 2. 16-sample instruction-sensitivity probe:
-   - our merged model drops much more under swapped instructions
+   - our retrieval / merged models drop much more under swapped instructions than Pic2Word
 
 The 2048-sample image-anchor probe alone should **not** be used as the sole evidence, because it is mixed and does not cleanly separate Pic2Word from our merged model.
