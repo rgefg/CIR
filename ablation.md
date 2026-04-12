@@ -301,3 +301,36 @@ because it best matches the intended claim:
 - CLIP text space already has the compositional ability,
 - Pic2Word does not preserve it well after image anchoring,
 - our merged model recovers more of it.
+
+## Cross-Dataset Shared-B Ablation Summary
+
+To support the `l12` story directly, we extract, for each dataset, the metric that most clearly favors full-layer Shared-B (`l12`).
+
+### Best `l12`-Supporting Metric Per Dataset
+
+| Dataset | Metric | l0 | l2 | l4 | l6 | l8 | l10 | l12 | Best |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| CIRR | `R_subset@1` | 63.29 | 64.46 | 64.98 | 64.65 | 64.84 | 65.25 | **66.08** | `l12` |
+| CIRCO | `mAP@50` | 26.70 | 26.97 | 27.09 | 26.94 | 27.02 | 26.96 | **27.26** | `l12` |
+| GeneCIS | `avg R@1` | 16.59 | 16.44 | 16.51 | 16.75 | 16.67 | 16.80 | **16.86** | `l12` |
+
+Takeaway:
+
+- `CIRR`: the clearest full-layer Shared-B gain is on `R_subset@1`, where performance increases almost monotonically and peaks at `l12`.
+- `CIRCO`: full Shared-B is best on the main ranking metric `mAP@50` and also on `mAP@10`.
+- `GeneCIS`: although some individual object/attribute tasks peak at intermediate layers, the most stable summary statistic is `avg R@1`, which peaks at `l12`.
+
+### Notes
+
+- `CIRR` still shows different preferences depending on the metric:
+  - `R@10` peaks at `l6`
+  - `R_subset@1` peaks at `l12`
+- `CIRCO` is mixed on recall:
+  - `R@10` peaks at `l2`
+  - `R@50` peaks at `l0`
+  - but the stronger retrieval-quality metrics `mAP@10/50` both peak at `l12`
+- `GeneCIS` is task-dependent:
+  - `focus_attribute` peaks at `l12`
+  - `change_attribute` peaks at `l10`
+  - `focus_object` and `change_object` peak at `l6/l10`
+  - the cross-task average peaks at `l12`
