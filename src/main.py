@@ -612,7 +612,8 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     geo_text_model = None
     shared_b_geo_exclude_names = set()
     args.shared_b_param_names = []
-    if float(getattr(args, "geo_weight", 0.0)) > 0.0:
+    joint_single_branch = bool(getattr(args, "joint_single_branch", False))
+    if float(getattr(args, "geo_weight", 0.0)) > 0.0 and not joint_single_branch:
         geo_text_model = TextEncoderBranch(model)
         if not getattr(args, "no_lora", False):
             apply_lora_to_linear_layers(
@@ -640,6 +641,10 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
                         "✅ Shared-B retrieval-only update is enabled: geo branch uses retrieval B in forward, "
                         "but shared B gradients are restored to retrieval-only values before optimizer step."
                     )
+    elif float(getattr(args, "geo_weight", 0.0)) > 0.0 and joint_single_branch and is_master(args):
+        logging.info(
+            "✅ Joint single-branch training enabled: retrieval and geo losses will optimize the same retrieval text branch."
+        )
     
     # ============================================================
     # 🔒 Logit Scale 修复选项

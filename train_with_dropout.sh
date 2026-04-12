@@ -95,6 +95,7 @@ RESET_LOGIT_SCALE="${RESET_LOGIT_SCALE:-1}"
 SHARED_B_LORA="${SHARED_B_LORA:-${SHARED_A_LORA:-0}}"
 SHARED_B_NUM_LAYERS="${SHARED_B_NUM_LAYERS:-${SHARED_A_NUM_LAYERS:-6}}"
 SHARED_B_RETRIEVAL_ONLY_UPDATE="${SHARED_B_RETRIEVAL_ONLY_UPDATE:-${SHARED_A_RETRIEVAL_ONLY_UPDATE:-0}}"
+JOINT_SINGLE_BRANCH="${JOINT_SINGLE_BRANCH:-0}"
 CONFLICT_PROBE="${CONFLICT_PROBE:-0}"
 CONFLICT_PROBE_EVERY="${CONFLICT_PROBE_EVERY:-25}"
 CONFLICT_PROBE_START="${CONFLICT_PROBE_START:-25}"
@@ -192,6 +193,7 @@ echo "Reset logit scale: ${RESET_LOGIT_SCALE}"
 echo "Shared-B LoRA: ${SHARED_B_LORA}"
 echo "Shared-B shallow layers: ${SHARED_B_NUM_LAYERS}"
 echo "Shared-B retrieval-only update: ${SHARED_B_RETRIEVAL_ONLY_UPDATE}"
+echo "Joint single-branch: ${JOINT_SINGLE_BRANCH}"
 echo "Posthoc merge mode: ${POSTHOC_MERGE_MODE}"
 echo "Conflict probe: enabled=${CONFLICT_PROBE}, every=${CONFLICT_PROBE_EVERY}, start=${CONFLICT_PROBE_START}, end=${CONFLICT_PROBE_END}"
 echo "Geo norm eps: embed=${GEO_EMBED_NORM_EPS}, delta=${GEO_DELTA_NORM_EPS}, min_delta=${GEO_DELTA_MIN_NORM}"
@@ -231,6 +233,9 @@ fi
 EXTRA_ARGS+=(--shared-b-num-layers "${SHARED_B_NUM_LAYERS}")
 if [[ "${SHARED_B_RETRIEVAL_ONLY_UPDATE}" == "1" ]]; then
   EXTRA_ARGS+=(--shared-b-retrieval-only-update)
+fi
+if [[ "${JOINT_SINGLE_BRANCH}" == "1" ]]; then
+  EXTRA_ARGS+=(--joint-single-branch)
 fi
 if [[ "${CONFLICT_PROBE}" == "1" ]]; then
   EXTRA_ARGS+=(

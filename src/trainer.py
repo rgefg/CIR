@@ -1442,7 +1442,8 @@ def train(
                 images = images.cuda(args.gpu, non_blocking=True)
 
             geo_weight = float(getattr(args, "geo_weight", 0.0))
-            geo_enabled = (g is not None) and (geo_weight > 0.0)
+            geo_model = g if g is not None else (m if getattr(args, "joint_single_branch", False) else None)
+            geo_enabled = (geo_model is not None) and (geo_weight > 0.0)
 
             if args.precision == "amp":
                 with autocast():
@@ -1477,7 +1478,7 @@ def train(
                         with autocast():
                             if geo_tgt:
                                 geo_loss, geo_stats, geo_aux = get_loss_geo_text_branch(
-                                    g,
+                                    geo_model,
                                     geo_src,
                                     geo_tgt,
                                     geo_fwd,
@@ -1485,7 +1486,7 @@ def train(
                                     args,
                                 )
                             else:
-                                geo_loss = _zero_geo_loss(g)
+                                geo_loss = _zero_geo_loss(geo_model)
                                 geo_stats = {
                                     "loss_fwd": 0.0,
                                     "loss_rev": 0.0,
@@ -1548,7 +1549,7 @@ def train(
                     with _geo_rng_context(geo_rng_state, enabled=True):
                         if geo_tgt:
                             geo_loss, geo_stats, geo_aux = get_loss_geo_text_branch(
-                                g,
+                                geo_model,
                                 geo_src,
                                 geo_tgt,
                                 geo_fwd,
@@ -1556,7 +1557,7 @@ def train(
                                 args,
                             )
                         else:
-                            geo_loss = _zero_geo_loss(g)
+                            geo_loss = _zero_geo_loss(geo_model)
                             geo_stats = {
                                 "loss_fwd": 0.0,
                                 "loss_rev": 0.0,
