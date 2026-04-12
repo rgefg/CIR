@@ -576,6 +576,8 @@ def parse_args():
     parser.add_argument("--shared-a-retrieval-only-update", dest="shared_b_retrieval_only_update", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--joint-single-branch", action="store_true", default=False,
                         help="Optimize retrieval and geo losses on the same retrieval text branch instead of a separate geo branch.")
+    parser.add_argument("--geo-only-branch", action="store_true", default=False,
+                        help="Disable retrieval loss and optimize only the separate geo branch, keeping its own visual/img2text initialization for later evaluation.")
     parser.add_argument("--conflict-probe", action="store_true", default=False,
                         help="Monitor same-batch retrieval/edit gradient conflict during training and export averaged statistics.")
     parser.add_argument("--conflict-probe-every", type=int, default=0,

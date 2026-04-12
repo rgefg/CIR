@@ -613,6 +613,7 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     shared_b_geo_exclude_names = set()
     args.shared_b_param_names = []
     joint_single_branch = bool(getattr(args, "joint_single_branch", False))
+    geo_only_branch = bool(getattr(args, "geo_only_branch", False))
     if float(getattr(args, "geo_weight", 0.0)) > 0.0 and not joint_single_branch:
         geo_text_model = TextEncoderBranch(model)
         if not getattr(args, "no_lora", False):
@@ -644,6 +645,10 @@ def main_worker(gpu, ngpus_per_node, log_queue, args):
     elif float(getattr(args, "geo_weight", 0.0)) > 0.0 and joint_single_branch and is_master(args):
         logging.info(
             "✅ Joint single-branch training enabled: retrieval and geo losses will optimize the same retrieval text branch."
+        )
+    if float(getattr(args, "geo_weight", 0.0)) > 0.0 and geo_only_branch and is_master(args):
+        logging.info(
+            "✅ Geo-only branch training enabled: retrieval loss is disabled; only the separate geo text branch is optimized."
         )
     
     # ============================================================

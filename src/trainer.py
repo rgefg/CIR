@@ -1442,22 +1442,28 @@ def train(
                 images = images.cuda(args.gpu, non_blocking=True)
 
             geo_weight = float(getattr(args, "geo_weight", 0.0))
+            geo_only_branch = bool(getattr(args, "geo_only_branch", False))
             geo_model = g if g is not None else (m if getattr(args, "joint_single_branch", False) else None)
             geo_enabled = (geo_model is not None) and (geo_weight > 0.0)
 
             if args.precision == "amp":
-                with autocast():
-                    retrieval_loss, retrieval_stats, retrieval_aux = get_loss_lcom_cc3m(
-                        m,
-                        i2t,
-                        images,
-                        instructions,
-                        modified_captions,
-                        loss_ce,
-                        args,
-                    )
+                if geo_only_branch:
+                    retrieval_loss = _zero_geo_loss(m)
+                    retrieval_stats, retrieval_aux = {}, {"per_sample_retrieval_loss": None}
                     total_loss = retrieval_loss / float(accum_steps)
-                retrieval_scaler.scale(total_loss).backward()
+                else:
+                    with autocast():
+                        retrieval_loss, retrieval_stats, retrieval_aux = get_loss_lcom_cc3m(
+                            m,
+                            i2t,
+                            images,
+                            instructions,
+                            modified_captions,
+                            loss_ce,
+                            args,
+                        )
+                        total_loss = retrieval_loss / float(accum_steps)
+                    retrieval_scaler.scale(total_loss).backward()
                 shared_b_saved_grads = None
                 if geo_enabled and shared_b_retrieval_only and shared_b_param_names:
                     shared_b_saved_grads = _capture_named_grads(m, shared_b_param_names)
@@ -1525,16 +1531,20 @@ def train(
                 else:
                     geo_loss, geo_stats, geo_aux, weighted_geo_loss = None, None, None, None
             else:
-                retrieval_loss, retrieval_stats, retrieval_aux = get_loss_lcom_cc3m(
-                    m,
-                    i2t,
-                    images,
-                    instructions,
-                    modified_captions,
-                    loss_ce,
-                    args,
-                )
-                (retrieval_loss / float(accum_steps)).backward()
+                if geo_only_branch:
+                    retrieval_loss = _zero_geo_loss(m)
+                    retrieval_stats, retrieval_aux = {}, {"per_sample_retrieval_loss": None}
+                else:
+                    retrieval_loss, retrieval_stats, retrieval_aux = get_loss_lcom_cc3m(
+                        m,
+                        i2t,
+                        images,
+                        instructions,
+                        modified_captions,
+                        loss_ce,
+                        args,
+                    )
+                    (retrieval_loss / float(accum_steps)).backward()
                 shared_b_saved_grads = None
                 if geo_enabled and shared_b_retrieval_only and shared_b_param_names:
                     shared_b_saved_grads = _capture_named_grads(m, shared_b_param_names)
