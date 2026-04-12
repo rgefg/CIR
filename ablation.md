@@ -337,17 +337,19 @@ Takeaway:
 
 ## Main Branch Ablation
 
-This ablation compares three training variants at a single representative checkpoint:
+This ablation compares four training/evaluation variants at a single representative checkpoint:
 
 - `retrieval-only`
 - `geo-only`
 - `joint`
+- `text-only LoRA`
 
 Current status:
 
 - `retrieval-only` results below are valid and complete.
 - the previous `geo-only` evaluation was invalid because it reused the retrieval branch visual encoder and `f_phi`; it was discarded.
 - the current `joint` evaluation needs to be relaunched on real host GPUs because the first attempt went through a sandboxed launch path.
+- `text-only LoRA` means evaluating the same Shared-B checkpoint with visual LoRA disabled, so only the text-encoder LoRA branch remains active on top of the frozen visual tower.
 
 ### Retrieval-Only (Valid)
 
@@ -362,6 +364,7 @@ Current status:
 | Variant | Dataset | Main metrics |
 |---|---|---|
 | retrieval-only | CIRR | `R@1 30.30`, `R@10 73.36`, `R@50 92.04`, `R_subset@1 64.46` |
+| text-only LoRA | CIRR | `R@1 26.76`, `R@10 71.13`, `R@50 91.27`, `R_subset@1 60.11` |
 | retrieval-only | CIRCO | `mAP@10 21.91`, `mAP@50 24.92`, `semantic mAP@10 20.10` |
 | retrieval-only | GeneCIS | `FA 21.75`, `CA 17.14`, `FO 13.98`, `CO 14.34` |
 
@@ -370,17 +373,20 @@ Current status:
 For `CIRR`, we currently have:
 
 - `retrieval-only`: full no-drop retrieval branch checkpoint from the Shared-B run
+- `text-only LoRA`: same no-drop Shared-B checkpoint, but with visual LoRA zeroed at eval time
 - `joint`: full joint-single checkpoint at `step1400`
 - `geo-only`: fast standalone geo-only run at `step200`
 
 | Variant | Checkpoint | R@1 | R@10 | R@50 | R_subset@1 |
 |---|---|---:|---:|---:|---:|
 | retrieval-only | `step1400` | 30.30 | 73.36 | 92.04 | 64.46 |
+| text-only LoRA | `step1400` | 26.76 | 71.13 | 91.27 | 60.11 |
 | joint | `step1400` | 26.79 | 70.29 | 90.12 | 61.09 |
 | geo-only | `step200` | 24.75 | 67.54 | 89.14 | 54.92 |
 
 Takeaway:
 
 - On `CIRR`, retrieval-only is strongest among the currently completed branch ablations.
+- Zeroing visual LoRA while keeping only text-encoder LoRA causes a clear drop on `CIRR`, so the visual LoRA contribution is not redundant in the Shared-B run.
 - The current joint-single run underperforms the retrieval-only baseline.
 - A short `geo-only` run is substantially weaker, suggesting that the geometric branch alone does not recover the full CIR objective.
