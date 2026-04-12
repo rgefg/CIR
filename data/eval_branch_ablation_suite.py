@@ -19,10 +19,10 @@ METRIC_RE = re.compile(r"([A-Za-z0-9_@]+):\s*([0-9.]+)")
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate retrieval-only or geo-only single checkpoints across CIRR/CIRCO/GeneCIS.")
+    parser = argparse.ArgumentParser(description="Evaluate retrieval-only, geo-only, or joint single checkpoints across CIRR/CIRCO/GeneCIS.")
     parser.add_argument("--resume", type=Path, required=True, help="Full retrieval checkpoint.")
     parser.add_argument("--output-json", type=Path, required=True)
-    parser.add_argument("--variant", choices=["retrieval_only", "geo_only"], required=True)
+    parser.add_argument("--variant", choices=["retrieval_only", "geo_only", "joint"], required=True)
     parser.add_argument("--geo-lora", type=Path, default=None, help="Required for geo_only.")
     parser.add_argument("--cirr-gpu", type=int, default=0)
     parser.add_argument("--suite-gpu", type=int, default=1)
