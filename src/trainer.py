@@ -1506,7 +1506,12 @@ def train(
                                 geo_aux = {"geo_logits_unit": None}
                             weighted_geo_loss = geo_loss * geo_weight
                         if torch.isfinite(weighted_geo_loss.detach()).all():
-                            geo_scaler.scale(weighted_geo_loss / float(accum_steps)).backward()
+                            active_geo_scaler = (
+                                retrieval_scaler
+                                if getattr(args, "joint_single_branch", False)
+                                else geo_scaler
+                            )
+                            active_geo_scaler.scale(weighted_geo_loss / float(accum_steps)).backward()
                             if shared_b_saved_grads is not None:
                                 restored_count = _restore_named_grads(m, shared_b_saved_grads)
                                 if loss_stats is None:
