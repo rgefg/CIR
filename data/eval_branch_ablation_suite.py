@@ -215,8 +215,14 @@ def main():
                 suite_cmd.extend(["--img2text-pretrained", args.img2text_pretrained])
             rc, out = run_subprocess(suite_cmd, env=env)
             if suite_out_path.exists():
-                result.update(json.loads(suite_out_path.read_text(encoding="utf-8")))
-                suite_out_path.unlink(missing_ok=True)
+                raw = suite_out_path.read_text(encoding="utf-8")
+                if raw.strip():
+                    result.update(json.loads(raw))
+                    suite_out_path.unlink(missing_ok=True)
+                else:
+                    suite_out_path.unlink(missing_ok=True)
+                    result["suite_status"] = "failed"
+                    result["suite_output"] = out or "suite output json was empty"
             else:
                 result["suite_status"] = "failed"
                 result["suite_output"] = out
