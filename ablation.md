@@ -192,3 +192,112 @@ then the strongest support is the combination:
    - our retrieval / merged models drop much more under swapped instructions than Pic2Word
 
 The 2048-sample image-anchor probe alone should **not** be used as the sole evidence, because it is mixed and does not cleanly separate Pic2Word from our merged model.
+
+## FashionIQ Oracle-Transfer Probe
+
+Goal:
+
+- test whether an image-grounded model can preserve the compositional instruction-following ability already present in CLIP's text space
+- compare `CLIP text-only oracle`, `Pic2Word`, `ours retrieval`, and `ours merged`
+
+Setup:
+
+- data: `FashionIQ val`
+- oracle query: text-only prompt `a photo of fashion item that cap1 and cap2`
+- image-grounded queries:
+  - `Pic2Word`: reference image + prompt
+  - `ours retrieval`: reference image + prompt
+  - `ours merged`: reference image + prompt
+- candidate sets:
+  - `full4`: true target, reference image, caption-similar wrong-source target, random target
+  - `source2`: true target vs reference image
+  - `edit2`: true target vs caption-similar wrong-source target
+
+### Raw Subset, Step1000
+
+File:
+
+- `logs/oracle_transfer_fashioniq_proxy_step1000_v2.json`
+
+`full4`:
+
+| Model | top1 | margin |
+|---|---:|---:|
+| CLIP oracle | 0.5833 | 0.0420 |
+| Pic2Word | 0.3854 | 0.0375 |
+| Ours retrieval | 0.5625 | 0.0569 |
+| Ours merged | 0.5729 | 0.0576 |
+
+This already gives one usable pattern:
+
+- `CLIP oracle > ours merged >> Pic2Word` in `top1`
+- `ours merged > ours retrieval` slightly
+
+### Clean Subset, Step1000
+
+File:
+
+- `logs/oracle_transfer_fashioniq_proxy_step1000_clean.json`
+
+Filter:
+
+- remove queries containing `same`
+- require at least `4` content words in the caption pair
+
+`source2`:
+
+| Model | top1 | margin |
+|---|---:|---:|
+| CLIP oracle | 0.8542 | 0.0592 |
+| Pic2Word | 0.5521 | 0.0044 |
+| Ours retrieval | 0.7500 | 0.0304 |
+| Ours merged | 0.7604 | 0.0345 |
+
+This is the cleanest version of the desired story:
+
+- `CLIP oracle` is best
+- `Pic2Word` is clearly much weaker
+- `ours merged` moves substantially closer to the oracle
+- `ours merged` is also slightly better than `ours retrieval`
+
+`full4` on the same clean subset:
+
+| Model | top1 | margin |
+|---|---:|---:|
+| CLIP oracle | 0.6667 | 0.0580 |
+| Pic2Word | 0.5312 | 0.0565 |
+| Ours retrieval | 0.6979 | 0.0742 |
+| Ours merged | 0.6979 | 0.0768 |
+
+This version is less aligned with the intended narrative because both of our image-grounded models surpass the text-only oracle in top1.
+
+### Clean Subset, Step600
+
+File:
+
+- `logs/oracle_transfer_fashioniq_proxy_step600_clean.json`
+
+`source2`:
+
+| Model | top1 | margin |
+|---|---:|---:|
+| CLIP oracle | 0.8542 | 0.0592 |
+| Pic2Word | 0.5521 | 0.0044 |
+| Ours retrieval | 0.7500 | 0.0289 |
+| Ours merged | 0.7500 | 0.0313 |
+
+This is similar to `step1000`, but `step1000` remains slightly better because `ours merged` improves from `0.7500` to `0.7604`.
+
+### Recommendation
+
+For paper writing, the strongest FashionIQ oracle-transfer evidence is:
+
+- `clean subset`
+- `source2`
+- `step1000`
+
+because it best matches the intended claim:
+
+- CLIP text space already has the compositional ability,
+- Pic2Word does not preserve it well after image anchoring,
+- our merged model recovers more of it.
