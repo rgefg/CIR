@@ -22,7 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate retrieval-only, geo-only, or joint single checkpoints across CIRR/CIRCO/GeneCIS.")
     parser.add_argument("--resume", type=Path, required=True, help="Full retrieval checkpoint.")
     parser.add_argument("--output-json", type=Path, required=True)
-    parser.add_argument("--variant", choices=["retrieval_only", "geo_only", "joint"], required=True)
+    parser.add_argument("--variant", choices=["retrieval_only", "geo_only", "joint", "text_lora_only"], required=True)
     parser.add_argument("--geo-lora", type=Path, default=None, help="Required for geo_only.")
     parser.add_argument("--cirr-gpu", type=int, default=0)
     parser.add_argument("--suite-gpu", type=int, default=1)
@@ -90,6 +90,25 @@ def build_geo_only_checkpoint(full_ckpt_path: Path, geo_lora_path: Path) -> Path
     return temp_path
 
 
+def build_text_lora_only_checkpoint(full_ckpt_path: Path) -> Path:
+    ckpt = _safe_load(full_ckpt_path)
+    state_dict = ckpt["state_dict"]
+    zeroed = 0
+    for key, value in list(state_dict.items()):
+        core = _strip_module_prefix(key)
+        if core.startswith("visual.") and (core.endswith(".A") or core.endswith(".B")):
+            state_dict[key] = torch.zeros_like(value)
+            zeroed += 1
+    if zeroed == 0:
+        raise RuntimeError(f"No visual LoRA tensors found in {full_ckpt_path}")
+    ckpt["state_dict"] = state_dict
+    ckpt["branch_variant"] = "text_lora_only"
+    with tempfile.NamedTemporaryFile(prefix="text_lora_only_", suffix=".pt", dir="/tmp", delete=False) as tmp:
+        temp_path = Path(tmp.name)
+    torch.save(ckpt, temp_path)
+    return temp_path
+
+
 def parse_cirr_metrics(output: str):
     metrics = {}
     current_feature = None
@@ -132,6 +151,9 @@ def main():
             if args.geo_lora is None:
                 raise ValueError("--geo-lora is required for geo_only")
             temp_resume = build_geo_only_checkpoint(args.resume, args.geo_lora)
+            eval_resume = temp_resume
+        elif args.variant == "text_lora_only":
+            temp_resume = build_text_lora_only_checkpoint(args.resume)
             eval_resume = temp_resume
 
         result = {

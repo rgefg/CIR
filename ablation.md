@@ -334,3 +334,53 @@ Takeaway:
   - `change_attribute` peaks at `l10`
   - `focus_object` and `change_object` peak at `l6/l10`
   - the cross-task average peaks at `l12`
+
+## Main Branch Ablation
+
+This ablation compares three training variants at a single representative checkpoint:
+
+- `retrieval-only`
+- `geo-only`
+- `joint`
+
+Current status:
+
+- `retrieval-only` results below are valid and complete.
+- the previous `geo-only` evaluation was invalid because it reused the retrieval branch visual encoder and `f_phi`; it was discarded.
+- the current `joint` evaluation needs to be relaunched on real host GPUs because the first attempt went through a sandboxed launch path.
+
+### Retrieval-Only (Valid)
+
+`CIRR` uses the no-drop run:
+
+- [retrieval_only_step1400_eval.json](/data2/mingyu/composed_image_retrieval/logs/DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTL14_SEARLEPhi_And_NoDrop_SharedB12_NoRev_CIRR_MergeCmp/retrieval_only_step1400_eval.json)
+
+`CIRCO` and `GeneCIS` use the drop0.5 run:
+
+- [retrieval_only_step1400_eval.json](/data2/mingyu/composed_image_retrieval/logs/DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTL14_SEARLEPhi_That_Drop0p5_SharedB12_NoRev_CIRCO_GeneCIS_MergeCmp/retrieval_only_step1400_eval.json)
+
+| Variant | Dataset | Main metrics |
+|---|---|---|
+| retrieval-only | CIRR | `R@1 30.30`, `R@10 73.36`, `R@50 92.04`, `R_subset@1 64.46` |
+| retrieval-only | CIRCO | `mAP@10 21.91`, `mAP@50 24.92`, `semantic mAP@10 20.10` |
+| retrieval-only | GeneCIS | `FA 21.75`, `CA 17.14`, `FO 13.98`, `CO 14.34` |
+
+### CIRR Branch Comparison
+
+For `CIRR`, we currently have:
+
+- `retrieval-only`: full no-drop retrieval branch checkpoint from the Shared-B run
+- `joint`: full joint-single checkpoint at `step1400`
+- `geo-only`: fast standalone geo-only run at `step200`
+
+| Variant | Checkpoint | R@1 | R@10 | R@50 | R_subset@1 |
+|---|---|---:|---:|---:|---:|
+| retrieval-only | `step1400` | 30.30 | 73.36 | 92.04 | 64.46 |
+| joint | `step1400` | 26.79 | 70.29 | 90.12 | 61.09 |
+| geo-only | `step200` | 24.75 | 67.54 | 89.14 | 54.92 |
+
+Takeaway:
+
+- On `CIRR`, retrieval-only is strongest among the currently completed branch ablations.
+- The current joint-single run underperforms the retrieval-only baseline.
+- A short `geo-only` run is substantially weaker, suggesting that the geometric branch alone does not recover the full CIR objective.
