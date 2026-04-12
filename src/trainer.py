@@ -1663,11 +1663,13 @@ def train(
         # optimizer step on accumulation boundary
         if (micro_idx % accum_steps) == 0:
             step = num_updates_per_epoch * epoch + update_idx
+            retrieval_step_ready = not bool(getattr(args, "geo_only_branch", False))
             geo_step_ready = geo_optimizer is not None and g is not None
             projection_stats = {}
             probe_metrics = None
             if args.precision == "amp":
-                retrieval_scaler.unscale_(optimizer)
+                if retrieval_step_ready:
+                    retrieval_scaler.unscale_(optimizer)
                 if geo_step_ready:
                     geo_scaler.unscale_(geo_optimizer)
             if (
@@ -1683,13 +1685,15 @@ def train(
                 geo_scheduler(step)
 
             if args.precision == "amp":
-                retrieval_scaler.step(optimizer)
-                retrieval_scaler.update()
+                if retrieval_step_ready:
+                    retrieval_scaler.step(optimizer)
+                    retrieval_scaler.update()
                 if geo_step_ready:
                     geo_scaler.step(geo_optimizer)
                     geo_scaler.update()
             else:
-                optimizer.step()
+                if retrieval_step_ready:
+                    optimizer.step()
                 if geo_step_ready:
                     geo_optimizer.step()
             if retrieval_model_ema is not None:
