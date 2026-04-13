@@ -344,12 +344,14 @@ This ablation compares four training/evaluation variants at a single representat
 - `joint`
 - `text-only LoRA`
 
-Current status:
+This section now contains the completed host-run results for all four variants.
 
-- `retrieval-only` results below are valid and complete.
-- the previous `geo-only` evaluation was invalid because it reused the retrieval branch visual encoder and `f_phi`; it was discarded.
-- the current `joint` evaluation needs to be relaunched on real host GPUs because the first attempt went through a sandboxed launch path.
+Notes:
+
 - `text-only LoRA` means evaluating the same Shared-B checkpoint with visual LoRA disabled, so only the text-encoder LoRA branch remains active on top of the frozen visual tower.
+- `CIRR` uses the no-drop Shared-B run.
+- `CIRCO` and `GeneCIS` use the drop0.5 Shared-B run.
+- `geo-only` is a fast standalone run at `step200`; the other three variants are evaluated at `step1400`.
 
 ### Retrieval-Only (Valid)
 
@@ -365,8 +367,16 @@ Current status:
 |---|---|---|
 | retrieval-only | CIRR | `R@1 30.30`, `R@10 73.36`, `R@50 92.04`, `R_subset@1 64.46` |
 | text-only LoRA | CIRR | `R@1 26.76`, `R@10 71.13`, `R@50 91.27`, `R_subset@1 60.11` |
+| joint | CIRR | `R@1 26.79`, `R@10 70.29`, `R@50 90.12`, `R_subset@1 61.09` |
+| geo-only | CIRR | `R@1 24.75`, `R@10 67.54`, `R@50 89.14`, `R_subset@1 54.92` |
 | retrieval-only | CIRCO | `mAP@10 21.91`, `mAP@50 24.92`, `semantic mAP@10 20.10` |
+| text-only LoRA | CIRCO | `mAP@10 15.36`, `mAP@50 17.97`, `semantic mAP@10 14.08` |
+| joint | CIRCO | `mAP@10 19.11`, `mAP@50 21.93`, `semantic mAP@10 19.17` |
+| geo-only | CIRCO | `mAP@10 10.80`, `mAP@50 13.27`, `semantic mAP@10 9.31` |
 | retrieval-only | GeneCIS | `FA 21.75`, `CA 17.14`, `FO 13.98`, `CO 14.34` |
+| text-only LoRA | GeneCIS | `FA 20.25`, `CA 16.19`, `FO 11.94`, `CO 11.38` |
+| joint | GeneCIS | `FA 22.15`, `CA 15.39`, `FO 15.46`, `CO 14.49` |
+| geo-only | GeneCIS | `FA 16.55`, `CA 15.29`, `FO 9.85`, `CO 11.12` |
 
 ### CIRR Branch Comparison
 
@@ -390,3 +400,44 @@ Takeaway:
 - Zeroing visual LoRA while keeping only text-encoder LoRA causes a clear drop on `CIRR`, so the visual LoRA contribution is not redundant in the Shared-B run.
 - The current joint-single run underperforms the retrieval-only baseline.
 - A short `geo-only` run is substantially weaker, suggesting that the geometric branch alone does not recover the full CIR objective.
+
+### CIRCO Branch Comparison
+
+For `CIRCO`, we compare the same four variants using:
+
+- `retrieval-only`: full drop0.5 Shared-B checkpoint at `step1400`
+- `text-only LoRA`: same checkpoint, but with visual LoRA zeroed at eval time
+- `joint`: joint-single drop0.5 checkpoint at `step1400`
+- `geo-only`: fast standalone geo-only run at `step200`
+
+| Variant | Checkpoint | mAP@10 | mAP@50 | semantic mAP@10 |
+|---|---:|---:|---:|---:|
+| retrieval-only | `step1400` | 21.91 | 24.92 | 20.10 |
+| text-only LoRA | `step1400` | 15.36 | 17.97 | 14.08 |
+| joint | `step1400` | 19.11 | 21.93 | 19.17 |
+| geo-only | `step200` | 10.80 | 13.27 | 9.31 |
+
+Takeaway:
+
+- On `CIRCO`, retrieval-only is also strongest.
+- Zeroing visual LoRA causes a large drop, larger than on `CIRR`, which suggests `CIRCO` depends heavily on visual-side adaptation.
+- Joint training recovers part of the retrieval-only performance, but still does not match it.
+- Geo-only is far too weak to serve as a standalone solution for `CIRCO`.
+
+### GeneCIS Branch Comparison
+
+For `GeneCIS`, we report the four per-task `R@1` values and the cross-task average:
+
+| Variant | Checkpoint | FA | CA | FO | CO | avg R@1 |
+|---|---:|---:|---:|---:|---:|---:|
+| retrieval-only | `step1400` | 21.75 | 17.14 | 13.98 | 14.34 | 16.80 |
+| text-only LoRA | `step1400` | 20.25 | 16.19 | 11.94 | 11.38 | 14.94 |
+| joint | `step1400` | 22.15 | 15.39 | 15.46 | 14.49 | 16.87 |
+| geo-only | `step200` | 16.55 | 15.29 | 9.85 | 11.12 | 13.20 |
+
+Takeaway:
+
+- On `GeneCIS`, the best average comes from `joint`, not retrieval-only.
+- `joint` is especially better on the object-sensitive tasks `FO` and `CO`.
+- `text-only LoRA` drops sharply on `FO/CO`, again showing that visual-side LoRA is not redundant.
+- `geo-only` keeps some attribute signal but is too weak overall.
