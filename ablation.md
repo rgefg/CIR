@@ -441,3 +441,55 @@ Takeaway:
 - `joint` is especially better on the object-sensitive tasks `FO` and `CO`.
 - `text-only LoRA` drops sharply on `FO/CO`, again showing that visual-side LoRA is not redundant even when the learned `f_\phi` is retained.
 - `geo-only` keeps some attribute signal but is too weak overall.
+
+### FashionIQ Qualitative Retrieval Cases
+
+To support the qualitative story, I searched `FashionIQ val` for cases where:
+
+- the full merged model retrieves the correct target at rank 1,
+- `Pic2Word`, the retrieval branch, and the geo branch all miss the target,
+- and the failure modes are visually interpretable.
+
+I did **not** find the fully strict pattern where retrieval always ranks a hand-constructed `edit_wrong_source` negative above the target. That probe is too brittle. What **does** appear reliably is a more realistic pattern:
+
+- `Pic2Word` falls back to the reference/source image,
+- the geo branch also falls back to the source or another weakly related image,
+- the retrieval branch follows the edit semantics but often picks the wrong edited item,
+- the merged model returns the correct target.
+
+The strongest example is:
+
+- `shirt / case_08_shirt_step1000`
+- files: [case_08_shirt_step1000](/data2/mingyu/composed_image_retrieval/docs/paper_examples/fashioniq_story_examples_shirt/case_08_shirt_step1000)
+- prompt: `a shiny light colored dress shirt and tie`
+- full-gallery ranks:
+  - `CLIP text oracle = 1`
+  - `Pic2Word = 3`
+  - `retrieval = 2`
+  - `geo = 4`
+  - `merged = 1`
+- top-1 behavior:
+  - `Pic2Word` returns the reference image itself
+  - `geo` also returns the reference image
+  - `retrieval` returns a wrong but edit-like shiny dress shirt
+  - `merged` returns the correct target shirt and tie image
+
+This is the cleanest example of the story we want:
+
+- `Pic2Word` and `geo` are overly source-biased,
+- the retrieval branch captures the edit direction but confuses the final target identity,
+- the merged model resolves both and retrieves the correct item.
+
+A second, visually clean backup case is:
+
+- `dress / case_01_dress_step1000`
+- files: [case_01_dress_step1000](/data2/mingyu/composed_image_retrieval/docs/paper_examples/fashioniq_story_examples_dress/case_01_dress_step1000)
+- prompt: `more plain`, `more coverage`, `darker`, `longer sleeves`
+- full-gallery ranks:
+  - `CLIP text oracle = 1`
+  - `Pic2Word = 583`
+  - `retrieval = 2`
+  - `geo = 4`
+  - `merged = 1`
+
+These qualitative cases are consistent with the quantitative oracle-transfer probe: the merged model retains more source-conditioned compositional ability than `Pic2Word`, while still behaving differently from the retrieval branch alone.
