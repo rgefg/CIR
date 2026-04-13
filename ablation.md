@@ -348,7 +348,7 @@ This section now contains the completed host-run results for all four variants.
 
 Notes:
 
-- `text-only LoRA` means evaluating the same Shared-B checkpoint with visual LoRA disabled, so only the text-encoder LoRA branch remains active on top of the frozen visual tower.
+- `text-only LoRA` means evaluating the same Shared-B checkpoint with visual LoRA disabled while keeping the learned `f_\phi` (`img2text`) module intact; in other words, the visual tower falls back to the frozen base encoder, but the trained image-to-text projection is still used.
 - `CIRR` uses the no-drop Shared-B run.
 - `CIRCO` and `GeneCIS` use the drop0.5 Shared-B run.
 - `geo-only` is a fast standalone run at `step200`; the other three variants are evaluated at `step1400`.
@@ -383,7 +383,7 @@ Notes:
 For `CIRR`, we currently have:
 
 - `retrieval-only`: full no-drop retrieval branch checkpoint from the Shared-B run
-- `text-only LoRA`: same no-drop Shared-B checkpoint, but with visual LoRA zeroed at eval time
+- `text-only LoRA`: same no-drop Shared-B checkpoint, but with visual LoRA zeroed at eval time while retaining the learned `f_\phi`
 - `joint`: full joint-single checkpoint at `step1400`
 - `geo-only`: fast standalone geo-only run at `step200`
 
@@ -397,7 +397,7 @@ For `CIRR`, we currently have:
 Takeaway:
 
 - On `CIRR`, retrieval-only is strongest among the currently completed branch ablations.
-- Zeroing visual LoRA while keeping only text-encoder LoRA causes a clear drop on `CIRR`, so the visual LoRA contribution is not redundant in the Shared-B run.
+- Zeroing visual LoRA while retaining the learned `f_\phi` still causes a clear drop on `CIRR`, so the visual LoRA contribution is not redundant in the Shared-B run.
 - The current joint-single run underperforms the retrieval-only baseline.
 - A short `geo-only` run is substantially weaker, suggesting that the geometric branch alone does not recover the full CIR objective.
 
@@ -420,7 +420,7 @@ For `CIRCO`, we compare the same four variants using:
 Takeaway:
 
 - On `CIRCO`, retrieval-only is also strongest.
-- Zeroing visual LoRA causes a large drop, larger than on `CIRR`, which suggests `CIRCO` depends heavily on visual-side adaptation.
+- Zeroing visual LoRA while retaining the learned `f_\phi` causes a large drop, larger than on `CIRR`, which suggests `CIRCO` depends heavily on visual-side adaptation.
 - Joint training recovers part of the retrieval-only performance, but still does not match it.
 - Geo-only is far too weak to serve as a standalone solution for `CIRCO`.
 
@@ -439,5 +439,5 @@ Takeaway:
 
 - On `GeneCIS`, the best average comes from `joint`, not retrieval-only.
 - `joint` is especially better on the object-sensitive tasks `FO` and `CO`.
-- `text-only LoRA` drops sharply on `FO/CO`, again showing that visual-side LoRA is not redundant.
+- `text-only LoRA` drops sharply on `FO/CO`, again showing that visual-side LoRA is not redundant even when the learned `f_\phi` is retained.
 - `geo-only` keeps some attribute signal but is too weak overall.
