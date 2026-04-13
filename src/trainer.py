@@ -592,8 +592,13 @@ def get_loss_geo_text_branch(
     args,
 ):
     device = next(text_model.parameters()).device
+    src_prompt_style = str(getattr(args, "geo_src_prompt_style", "plain")).lower()
 
-    csrc = [_to_text(x) for x in src_captions]
+    csrc_raw = [_to_text(x) for x in src_captions]
+    if src_prompt_style == "photo":
+        csrc = [f"a photo of {x}" if x.strip() else "" for x in csrc_raw]
+    else:
+        csrc = csrc_raw
     ctgt = [_to_text(x) for x in modified_captions]
     fwd = [_to_text(x) for x in forward_instructions] if forward_instructions else [""] * len(ctgt)
     rev = [_to_text(x) for x in reverse_instructions] if reverse_instructions else [""] * len(ctgt)
@@ -686,6 +691,7 @@ def get_loss_geo_text_branch(
         "geo_missing_src_ratio": missing_src_ratio,
         "geo_small_delta_ratio": small_delta_ratio,
         "geo_delta_norm_mean": delta_norm_mean,
+        "geo_src_prompt_is_photo": 1.0 if src_prompt_style == "photo" else 0.0,
     }
     aux = {
         "geo_logits_unit": valid_geo_logits_unit,

@@ -88,6 +88,7 @@ GEO_ZERO_LOSS_WEIGHT="${GEO_ZERO_LOSS_WEIGHT:-1.0}"
 GEO_EMBED_NORM_EPS="${GEO_EMBED_NORM_EPS:-1e-6}"
 GEO_DELTA_NORM_EPS="${GEO_DELTA_NORM_EPS:-1e-4}"
 GEO_DELTA_MIN_NORM="${GEO_DELTA_MIN_NORM:-1e-3}"
+GEO_SRC_PROMPT_STYLE="${GEO_SRC_PROMPT_STYLE:-plain}"
 GEO_SAMPLING_MODE="${GEO_SAMPLING_MODE:-hard}"
 GEO_TOPK="${GEO_TOPK:-8}"
 INSTRUCTION_DROPOUT_PROB="${INSTRUCTION_DROPOUT_PROB:-0.0}"
@@ -189,6 +190,7 @@ echo "EMA eval: ${ENABLE_EMA_EVAL}"
 echo "EMA save checkpoints: ${ENABLE_EMA_SAVE_CHECKPOINTS}"
 echo "Geo strict loss: reverse_weight=${GEO_REVERSE_WEIGHT}, reverse_margin=${GEO_REVERSE_MARGIN}, zero_loss_weight=${GEO_ZERO_LOSS_WEIGHT}"
 echo "Geo sampling: mode=${GEO_SAMPLING_MODE}, topk=${GEO_TOPK}"
+echo "Geo source prompt style: ${GEO_SRC_PROMPT_STYLE}"
 echo "Instruction dropout prob: ${INSTRUCTION_DROPOUT_PROB}"
 echo "Reset logit scale: ${RESET_LOGIT_SCALE}"
 echo "Shared-B LoRA: ${SHARED_B_LORA}"
@@ -328,6 +330,7 @@ else
     --geo-reverse-weight "${GEO_REVERSE_WEIGHT}" \
     --geo-reverse-margin "${GEO_REVERSE_MARGIN}" \
     --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}" \
+    --geo-src-prompt-style "${GEO_SRC_PROMPT_STYLE}" \
     --geo-sampling-mode "${GEO_SAMPLING_MODE}" \
     --geo-topk "${GEO_TOPK}" \
     --geo-embed-norm-eps "${GEO_EMBED_NORM_EPS}" \

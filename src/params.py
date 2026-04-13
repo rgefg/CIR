@@ -561,6 +561,8 @@ def parse_args():
                         help="Lower bound used when normalizing the geo delta direction z_tgt - z_src.")
     parser.add_argument("--geo-delta-min-norm", type=float, default=1e-3,
                         help="Skip geo samples whose text delta norm is too small to define a stable direction.")
+    parser.add_argument("--geo-src-prompt-style", type=str, default="plain", choices=["plain", "photo"],
+                        help="How to format source captions in the geo branch. 'plain' uses the raw caption; 'photo' wraps it as 'a photo of {caption}'.")
     parser.add_argument("--geo-sampling-mode", type=str, default="all", choices=["all", "hard", "random"],
                         help="Subset strategy for the geo branch within each retrieval batch.")
     parser.add_argument("--geo-topk", type=int, default=0,
