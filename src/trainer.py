@@ -593,6 +593,7 @@ def get_loss_geo_text_branch(
 ):
     device = next(text_model.parameters()).device
     src_prompt_style = str(getattr(args, "geo_src_prompt_style", "plain")).lower()
+    use_reverse_alignment = bool(getattr(args, "geo_use_reverse_alignment", True))
 
     csrc_raw = [_to_text(x) for x in src_captions]
     if src_prompt_style == "photo":
@@ -607,7 +608,9 @@ def get_loss_geo_text_branch(
     has_tgt = torch.tensor([bool(x.strip()) for x in ctgt], device=device, dtype=torch.bool)
     has_fwd = torch.tensor([bool(x.strip()) for x in fwd], device=device, dtype=torch.bool)
     has_rev = torch.tensor([bool(x.strip()) for x in rev], device=device, dtype=torch.bool)
-    valid_mask = has_src & has_tgt & has_fwd & has_rev
+    valid_mask = has_src & has_tgt & has_fwd
+    if use_reverse_alignment:
+        valid_mask = valid_mask & has_rev
 
     embed_norm_eps = float(getattr(args, "geo_embed_norm_eps", 1e-6))
     delta_norm_eps = float(getattr(args, "geo_delta_norm_eps", 1e-4))
@@ -647,13 +650,16 @@ def get_loss_geo_text_branch(
         valid_zero_residual = torch.norm((z_fwd + z_rev)[valid_mask], dim=-1)
 
         loss_fwd = (1.0 - valid_fwd_align).mean()
-        loss_rev = (1.0 - valid_rev_align).mean()
+        if use_reverse_alignment:
+            loss_rev = (1.0 - valid_rev_align).mean()
+        else:
+            loss_rev = loss_fwd.detach() * 0.0
         loss_reverse = F.relu(valid_fwd_rev_cos + reverse_margin).mean()
         loss_zero = valid_zero_residual.mean()
         geom_loss = loss_fwd + loss_rev + (reverse_weight * loss_reverse) + (zero_loss_weight * loss_zero)
 
         mean_fwd_align = float(valid_fwd_align.mean().detach().item())
-        mean_rev_align = float(valid_rev_align.mean().detach().item())
+        mean_rev_align = float(valid_rev_align.mean().detach().item()) if use_reverse_alignment else 0.0
         mean_fwd_rev_cos = float(valid_fwd_rev_cos.mean().detach().item())
         mean_zero_residual = float(valid_zero_residual.mean().detach().item())
     else:
@@ -692,6 +698,7 @@ def get_loss_geo_text_branch(
         "geo_small_delta_ratio": small_delta_ratio,
         "geo_delta_norm_mean": delta_norm_mean,
         "geo_src_prompt_is_photo": 1.0 if src_prompt_style == "photo" else 0.0,
+        "geo_use_reverse_alignment": 1.0 if use_reverse_alignment else 0.0,
     }
     aux = {
         "geo_logits_unit": valid_geo_logits_unit,

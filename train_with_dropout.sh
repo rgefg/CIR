@@ -84,6 +84,7 @@ GEO_EMA_DECAY="${GEO_EMA_DECAY:-${RETRIEVAL_EMA_DECAY}}"
 ENABLE_GEO_CONFLICT_PROJECTION="${ENABLE_GEO_CONFLICT_PROJECTION:-1}"
 GEO_REVERSE_WEIGHT="${GEO_REVERSE_WEIGHT:-0.25}"
 GEO_REVERSE_MARGIN="${GEO_REVERSE_MARGIN:-0.0}"
+GEO_USE_REVERSE_ALIGNMENT="${GEO_USE_REVERSE_ALIGNMENT:-1}"
 GEO_ZERO_LOSS_WEIGHT="${GEO_ZERO_LOSS_WEIGHT:-1.0}"
 GEO_EMBED_NORM_EPS="${GEO_EMBED_NORM_EPS:-1e-6}"
 GEO_DELTA_NORM_EPS="${GEO_DELTA_NORM_EPS:-1e-4}"
@@ -189,6 +190,7 @@ echo "Geo EMA decay: ${GEO_EMA_DECAY}"
 echo "EMA eval: ${ENABLE_EMA_EVAL}"
 echo "EMA save checkpoints: ${ENABLE_EMA_SAVE_CHECKPOINTS}"
 echo "Geo strict loss: reverse_weight=${GEO_REVERSE_WEIGHT}, reverse_margin=${GEO_REVERSE_MARGIN}, zero_loss_weight=${GEO_ZERO_LOSS_WEIGHT}"
+echo "Geo direct reverse alignment: ${GEO_USE_REVERSE_ALIGNMENT}"
 echo "Geo sampling: mode=${GEO_SAMPLING_MODE}, topk=${GEO_TOPK}"
 echo "Geo source prompt style: ${GEO_SRC_PROMPT_STYLE}"
 echo "Instruction dropout prob: ${INSTRUCTION_DROPOUT_PROB}"
@@ -329,6 +331,7 @@ else
     --geo-ema-decay "${GEO_EMA_DECAY}" \
     --geo-reverse-weight "${GEO_REVERSE_WEIGHT}" \
     --geo-reverse-margin "${GEO_REVERSE_MARGIN}" \
+    $(if [[ "${GEO_USE_REVERSE_ALIGNMENT}" == "1" ]]; then printf '%s ' --geo-use-reverse-alignment; else printf '%s ' --no-geo-use-reverse-alignment; fi) \
     --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}" \
     --geo-src-prompt-style "${GEO_SRC_PROMPT_STYLE}" \
     --geo-sampling-mode "${GEO_SAMPLING_MODE}" \
