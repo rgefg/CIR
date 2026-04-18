@@ -567,6 +567,14 @@ def parse_args():
                         help="Skip geo samples whose text delta norm is too small to define a stable direction.")
     parser.add_argument("--geo-src-prompt-style", type=str, default="plain", choices=["plain", "photo"],
                         help="How to format source captions in the geo branch. 'plain' uses the raw caption; 'photo' wraps it as 'a photo of {caption}'.")
+    parser.add_argument("--geo-src-anchor-mode", type=str, default="text", choices=["text", "image", "blend"],
+                        help="How the geo branch constructs the source anchor. 'text' uses source caption only; "
+                             "'image' uses a shared image anchor from visual encoder + img2text; "
+                             "'blend' linearly mixes text and image anchors before normalization.")
+    parser.add_argument("--geo-src-image-weight", type=float, default=0.25,
+                        help="Blend weight for the image anchor when --geo-src-anchor-mode=blend.")
+    parser.add_argument("--geo-src-anchor-detach", action="store_true", default=False,
+                        help="Detach the shared image anchor before geo loss, so geo updates only the geo text branch.")
     parser.add_argument("--geo-sampling-mode", type=str, default="all", choices=["all", "hard", "random"],
                         help="Subset strategy for the geo branch within each retrieval batch.")
     parser.add_argument("--geo-topk", type=int, default=0,

@@ -90,6 +90,9 @@ GEO_EMBED_NORM_EPS="${GEO_EMBED_NORM_EPS:-1e-6}"
 GEO_DELTA_NORM_EPS="${GEO_DELTA_NORM_EPS:-1e-4}"
 GEO_DELTA_MIN_NORM="${GEO_DELTA_MIN_NORM:-1e-3}"
 GEO_SRC_PROMPT_STYLE="${GEO_SRC_PROMPT_STYLE:-plain}"
+GEO_SRC_ANCHOR_MODE="${GEO_SRC_ANCHOR_MODE:-text}"
+GEO_SRC_IMAGE_WEIGHT="${GEO_SRC_IMAGE_WEIGHT:-0.25}"
+GEO_SRC_ANCHOR_DETACH="${GEO_SRC_ANCHOR_DETACH:-0}"
 GEO_SAMPLING_MODE="${GEO_SAMPLING_MODE:-hard}"
 GEO_TOPK="${GEO_TOPK:-8}"
 INSTRUCTION_DROPOUT_PROB="${INSTRUCTION_DROPOUT_PROB:-0.0}"
@@ -193,6 +196,7 @@ echo "Geo strict loss: reverse_weight=${GEO_REVERSE_WEIGHT}, reverse_margin=${GE
 echo "Geo direct reverse alignment: ${GEO_USE_REVERSE_ALIGNMENT}"
 echo "Geo sampling: mode=${GEO_SAMPLING_MODE}, topk=${GEO_TOPK}"
 echo "Geo source prompt style: ${GEO_SRC_PROMPT_STYLE}"
+echo "Geo source anchor: mode=${GEO_SRC_ANCHOR_MODE}, image_weight=${GEO_SRC_IMAGE_WEIGHT}, detach=${GEO_SRC_ANCHOR_DETACH}"
 echo "Instruction dropout prob: ${INSTRUCTION_DROPOUT_PROB}"
 echo "Reset logit scale: ${RESET_LOGIT_SCALE}"
 echo "Shared-B LoRA: ${SHARED_B_LORA}"
@@ -334,6 +338,9 @@ else
     $(if [[ "${GEO_USE_REVERSE_ALIGNMENT}" == "1" ]]; then printf '%s ' --geo-use-reverse-alignment; else printf '%s ' --no-geo-use-reverse-alignment; fi) \
     --geo-zero-loss-weight "${GEO_ZERO_LOSS_WEIGHT}" \
     --geo-src-prompt-style "${GEO_SRC_PROMPT_STYLE}" \
+    --geo-src-anchor-mode "${GEO_SRC_ANCHOR_MODE}" \
+    --geo-src-image-weight "${GEO_SRC_IMAGE_WEIGHT}" \
+    $(if [[ "${GEO_SRC_ANCHOR_DETACH}" == "1" ]]; then printf '%s ' --geo-src-anchor-detach; fi) \
     --geo-sampling-mode "${GEO_SAMPLING_MODE}" \
     --geo-topk "${GEO_TOPK}" \
     --geo-embed-norm-eps "${GEO_EMBED_NORM_EPS}" \

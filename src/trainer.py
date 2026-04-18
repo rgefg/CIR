@@ -512,6 +512,25 @@ def _zero_geo_loss(text_model):
     return first_param.sum() * 0.0
 
 
+def _compute_geo_src_image_tokens(model, img2text, images, indices, args):
+    anchor_mode = str(getattr(args, "geo_src_anchor_mode", "text")).lower()
+    if anchor_mode == "text" or indices is None or len(indices) == 0:
+        return None
+
+    gather_idx = torch.as_tensor(indices, device=images.device, dtype=torch.long)
+    geo_images = images.index_select(0, gather_idx)
+    detach_anchor = bool(getattr(args, "geo_src_anchor_detach", False))
+
+    if detach_anchor:
+        with torch.no_grad():
+            geo_image_features = model.encode_image(geo_images)
+            geo_src_image_tokens = img2text(geo_image_features)
+        return geo_src_image_tokens.detach()
+
+    geo_image_features = model.encode_image(geo_images)
+    return img2text(geo_image_features)
+
+
 def select_geo_subset(
     src_captions,
     modified_captions,
@@ -590,9 +609,15 @@ def get_loss_geo_text_branch(
     forward_instructions,
     reverse_instructions,
     args,
+    src_image_tokens=None,
 ):
     device = next(text_model.parameters()).device
     src_prompt_style = str(getattr(args, "geo_src_prompt_style", "plain")).lower()
+    src_anchor_mode = str(getattr(args, "geo_src_anchor_mode", "text")).lower()
+    src_image_weight = float(getattr(args, "geo_src_image_weight", 0.25))
+    reverse_weight = float(getattr(args, "geo_reverse_weight", 0.25))
+    reverse_margin = float(getattr(args, "geo_reverse_margin", 0.0))
+    zero_loss_weight = float(getattr(args, "geo_zero_loss_weight", 0.0))
     use_reverse_alignment = bool(getattr(args, "geo_use_reverse_alignment", True))
 
     csrc_raw = [_to_text(x) for x in src_captions]
@@ -609,7 +634,8 @@ def get_loss_geo_text_branch(
     has_fwd = torch.tensor([bool(x.strip()) for x in fwd], device=device, dtype=torch.bool)
     has_rev = torch.tensor([bool(x.strip()) for x in rev], device=device, dtype=torch.bool)
     valid_mask = has_src & has_tgt & has_fwd
-    if use_reverse_alignment:
+    needs_reverse_text = use_reverse_alignment or (reverse_weight > 0.0) or (zero_loss_weight > 0.0)
+    if needs_reverse_text:
         valid_mask = valid_mask & has_rev
 
     embed_norm_eps = float(getattr(args, "geo_embed_norm_eps", 1e-6))
@@ -621,10 +647,38 @@ def get_loss_geo_text_branch(
     fwd_tokens = tokenize(fwd, truncate=True).to(device, non_blocking=True)
     rev_tokens = tokenize(rev, truncate=True).to(device, non_blocking=True)
 
-    z_src = _safe_l2_normalize(text_model.encode_text(csrc_tokens), dim=-1, eps=embed_norm_eps)
+    z_src_text = _safe_l2_normalize(text_model.encode_text(csrc_tokens), dim=-1, eps=embed_norm_eps)
     z_tgt = _safe_l2_normalize(text_model.encode_text(ctgt_tokens), dim=-1, eps=embed_norm_eps)
     z_fwd = _safe_l2_normalize(text_model.encode_text(fwd_tokens), dim=-1, eps=embed_norm_eps)
     z_rev = _safe_l2_normalize(text_model.encode_text(rev_tokens), dim=-1, eps=embed_norm_eps)
+
+    z_src_image = None
+    src_anchor_cos = None
+    if src_anchor_mode in {"image", "blend"}:
+        if src_image_tokens is None:
+            raise ValueError("geo_src_anchor_mode requires src_image_tokens, but none were provided")
+        src_image_tokens = src_image_tokens.to(device=device, dtype=text_model.dtype)
+        placeholder = getattr(args, "prompt_placeholder", "*")
+        placeholder_token_id = int(tokenize([placeholder])[0][1].item())
+        src_anchor_prompts = [f"a photo of {placeholder}" for _ in csrc]
+        src_anchor_tokens = tokenize(src_anchor_prompts, truncate=True).to(device, non_blocking=True)
+        z_src_image = _safe_l2_normalize(
+            text_model.encode_text_img_vis(src_anchor_tokens, src_image_tokens, split_ind=placeholder_token_id),
+            dim=-1,
+            eps=embed_norm_eps,
+        )
+        src_anchor_cos = (z_src_text * z_src_image).sum(dim=-1)
+
+    if src_anchor_mode == "image":
+        z_src = z_src_image
+    elif src_anchor_mode == "blend":
+        z_src = _safe_l2_normalize(
+            ((1.0 - src_image_weight) * z_src_text) + (src_image_weight * z_src_image),
+            dim=-1,
+            eps=embed_norm_eps,
+        )
+    else:
+        z_src = z_src_text
 
     delta_raw = z_tgt - z_src
     delta_raw_norm = delta_raw.norm(dim=-1)
@@ -639,15 +693,13 @@ def get_loss_geo_text_branch(
     fwd_rev_cos = (z_fwd * z_rev).sum(dim=-1)
 
     valid_count = int(valid_mask.sum().item())
-    reverse_weight = float(getattr(args, "geo_reverse_weight", 0.25))
-    reverse_margin = float(getattr(args, "geo_reverse_margin", 0.0))
-    zero_loss_weight = float(getattr(args, "geo_zero_loss_weight", 0.0))
 
     if valid_count > 0:
         valid_fwd_align = fwd_align[valid_mask]
         valid_rev_align = rev_align[valid_mask]
         valid_fwd_rev_cos = fwd_rev_cos[valid_mask]
         valid_zero_residual = torch.norm((z_fwd + z_rev)[valid_mask], dim=-1)
+        valid_src_anchor_cos = src_anchor_cos[valid_mask] if src_anchor_cos is not None else None
 
         loss_fwd = (1.0 - valid_fwd_align).mean()
         if use_reverse_alignment:
@@ -662,6 +714,7 @@ def get_loss_geo_text_branch(
         mean_rev_align = float(valid_rev_align.mean().detach().item()) if use_reverse_alignment else 0.0
         mean_fwd_rev_cos = float(valid_fwd_rev_cos.mean().detach().item())
         mean_zero_residual = float(valid_zero_residual.mean().detach().item())
+        mean_src_anchor_cos = float(valid_src_anchor_cos.mean().detach().item()) if valid_src_anchor_cos is not None else 0.0
     else:
         geom_loss = (z_src.sum() + z_tgt.sum() + z_fwd.sum() + z_rev.sum()) * 0.0
         loss_fwd = geom_loss.detach()
@@ -672,6 +725,7 @@ def get_loss_geo_text_branch(
         mean_rev_align = 0.0
         mean_fwd_rev_cos = 0.0
         mean_zero_residual = 0.0
+        mean_src_anchor_cos = 0.0
 
     valid_ratio = float(valid_mask.float().mean().detach().item()) if len(ctgt) > 0 else 0.0
     missing_src_ratio = float((~has_src).float().mean().detach().item()) if len(ctgt) > 0 else 0.0
@@ -698,6 +752,10 @@ def get_loss_geo_text_branch(
         "geo_small_delta_ratio": small_delta_ratio,
         "geo_delta_norm_mean": delta_norm_mean,
         "geo_src_prompt_is_photo": 1.0 if src_prompt_style == "photo" else 0.0,
+        "geo_src_anchor_is_image": 1.0 if src_anchor_mode == "image" else 0.0,
+        "geo_src_anchor_is_blend": 1.0 if src_anchor_mode == "blend" else 0.0,
+        "geo_src_image_weight": src_image_weight,
+        "geo_src_anchor_cos": mean_src_anchor_cos,
         "geo_use_reverse_alignment": 1.0 if use_reverse_alignment else 0.0,
     }
     aux = {
@@ -1496,6 +1554,13 @@ def train(
                     with _geo_rng_context(geo_rng_state, enabled=True):
                         with autocast():
                             if geo_tgt:
+                                geo_src_image_tokens = _compute_geo_src_image_tokens(
+                                    m,
+                                    i2t,
+                                    images,
+                                    geo_indices,
+                                    args,
+                                )
                                 geo_loss, geo_stats, geo_aux = get_loss_geo_text_branch(
                                     geo_model,
                                     geo_src,
@@ -1503,6 +1568,7 @@ def train(
                                     geo_fwd,
                                     geo_rev,
                                     args,
+                                    src_image_tokens=geo_src_image_tokens,
                                 )
                             else:
                                 geo_loss = _zero_geo_loss(geo_model)
@@ -1576,6 +1642,13 @@ def train(
                     geo_rev = _select_batch_items(reverse_instructions, geo_indices)
                     with _geo_rng_context(geo_rng_state, enabled=True):
                         if geo_tgt:
+                            geo_src_image_tokens = _compute_geo_src_image_tokens(
+                                m,
+                                i2t,
+                                images,
+                                geo_indices,
+                                args,
+                            )
                             geo_loss, geo_stats, geo_aux = get_loss_geo_text_branch(
                                 geo_model,
                                 geo_src,
@@ -1583,6 +1656,7 @@ def train(
                                 geo_fwd,
                                 geo_rev,
                                 args,
+                                src_image_tokens=geo_src_image_tokens,
                             )
                         else:
                             geo_loss = _zero_geo_loss(geo_model)

@@ -325,6 +325,30 @@ class TextEncoderBranch(nn.Module):
         x = x[torch.arange(x.size(0), device=x.device), collect_ind] @ self.text_projection
         return x
 
+    def encode_text_img_vis(self, text, img_tokens, split_ind=4):
+        x = self.token_embedding(text).type(self.dtype)
+        collect_ind = text == self.end_id
+        collect_ind = collect_ind.nonzero()[:, 1]
+        new_x = []
+        for i, sample in enumerate(x):
+            ind_insert = text[i] == split_ind
+            sample = sample.view(1, x.size(1), -1)
+            img = img_tokens[i].view(1, 1, -1)
+            inds = ind_insert.nonzero()
+            if len(inds) == 0:
+                raise ValueError(f"Placeholder token id {split_ind} not found in text[{i}]")
+            ind0 = inds[0]
+            sample = torch.cat([sample[:, :ind0], img, sample[:, ind0 + 1:]], dim=1)
+            new_x.append(sample)
+        x = torch.cat(new_x, dim=0)
+        x = x + self.positional_embedding.type(self.dtype)
+        x = x.permute(1, 0, 2)
+        x = self.transformer(x)
+        x = x.permute(1, 0, 2)
+        x = self.ln_final(x).type(self.dtype)
+        x = x[torch.arange(x.size(0), device=x.device), collect_ind] @ self.text_projection
+        return x
+
 
 def copy_text_branch_weights_from_clip(text_branch: nn.Module, clip_model: nn.Module):
     branch = text_branch.module if hasattr(text_branch, "module") else text_branch
