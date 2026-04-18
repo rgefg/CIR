@@ -15,6 +15,8 @@ GEO_ZERO_LOSS_WEIGHT="${GEO_ZERO_LOSS_WEIGHT:-1.0}"
 GEO_SRC_ANCHOR_MODE="${GEO_SRC_ANCHOR_MODE:-text}"
 GEO_SRC_IMAGE_WEIGHT="${GEO_SRC_IMAGE_WEIGHT:-0.25}"
 GEO_SRC_ANCHOR_DETACH="${GEO_SRC_ANCHOR_DETACH:-0}"
+TRAIN_STEPS="${TRAIN_STEPS:-1000}"
+EVAL_STEP="${EVAL_STEP:-${TRAIN_STEPS}}"
 
 LOG_DIR="${ROOT}/logs/${RUN_NAME}"
 CKPT_DIR="${LOG_DIR}/checkpoints"
@@ -39,10 +41,10 @@ TRAIN_ACCUM_STEPS="8" \
 LR="2e-5" \
 GEO_LR="2e-5" \
 INSTRUCTION_DROPOUT_PROB="0.0" \
-TRAIN_EPOCH_STEPS="1000" \
-SAVE_STEP_START="1000" \
-SAVE_STEP_END="1000" \
-SAVE_STEP_INTERVAL="1000" \
+TRAIN_EPOCH_STEPS="${TRAIN_STEPS}" \
+SAVE_STEP_START="${EVAL_STEP}" \
+SAVE_STEP_END="${EVAL_STEP}" \
+SAVE_STEP_INTERVAL="${EVAL_STEP}" \
 SHARED_B_LORA="1" \
 SHARED_B_NUM_LAYERS="12" \
 SHARED_B_RETRIEVAL_ONLY_UPDATE="1" \
@@ -58,11 +60,21 @@ RUN_POSTHOC_SECOND_MERGED_EVAL="0" \
 RUN_POSTHOC_CIRR_EVAL="0" \
 MULTIDATASET_EVAL_EVERY="0" \
 CIRR_VAL_EVAL_EVERY="0" \
-bash "${ROOT}/train_with_dropout.sh"
+bash "${ROOT}/train_with_dropout.sh" || true
+
+if [[ ! -f "${CKPT_DIR}/epoch_0_step_${EVAL_STEP}.pt" ]]; then
+  echo "Missing retrieval checkpoint: ${CKPT_DIR}/epoch_0_step_${EVAL_STEP}.pt" >&2
+  exit 1
+fi
+
+if [[ ! -f "${CKPT_DIR}/epoch_0_step_${EVAL_STEP}_geo_lora_ema.pt" ]]; then
+  echo "Missing geo EMA checkpoint: ${CKPT_DIR}/epoch_0_step_${EVAL_STEP}_geo_lora_ema.pt" >&2
+  exit 1
+fi
 
 "${PYTHON_BIN}" "${ROOT}/data/eval_single_merged_cirr_val.py" \
-  --ckpt-a "${CKPT_DIR}/epoch_0_step_1000.pt" \
-  --ckpt-b "${CKPT_DIR}/epoch_0_step_1000_geo_lora_ema.pt" \
+  --ckpt-a "${CKPT_DIR}/epoch_0_step_${EVAL_STEP}.pt" \
+  --ckpt-b "${CKPT_DIR}/epoch_0_step_${EVAL_STEP}_geo_lora_ema.pt" \
   --output-json "${RESULT_JSON}" \
   --eval-gpu "${EVAL_GPU}" \
   --model "ViT-L/14" \
