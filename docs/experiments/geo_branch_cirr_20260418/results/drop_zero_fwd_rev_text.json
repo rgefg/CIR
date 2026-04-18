@@ -1,0 +1,59 @@
+{
+  "status": "ok",
+  "merge": {
+    "ckpt_a": "/data2/mingyu/composed_image_retrieval/logs/DistillCIR_ViTL14_SharedB12_CIRR150_FwdRev_Text/checkpoints/epoch_0_step_150.pt",
+    "ckpt_b": "/data2/mingyu/composed_image_retrieval/logs/DistillCIR_ViTL14_SharedB12_CIRR150_FwdRev_Text/checkpoints/epoch_0_step_150_geo_lora_ema.pt",
+    "weights": [
+      0.5,
+      0.5
+    ],
+    "density": 0.9,
+    "mode": "ties"
+  },
+  "metrics": {
+    "composed": {
+      "19": 33.0,
+      "FeatureR@1": 25.1854,
+      "R@5": 55.7522,
+      "R@10": 69.5527,
+      "R@50": 90.5047,
+      "R@100": 94.475,
+      "R_subset@1": 55.3934,
+      "R_subset@2": 76.7998,
+      "R_subset@3": 88.2803
+    },
+    "image": {
+      "19": 34.0,
+      "FeatureR@1": 7.1992,
+      "R@5": 25.305,
+      "R@10": 35.3504,
+      "R@50": 59.9378,
+      "R@100": 69.0505,
+      "R_subset@1": 21.7412,
+      "R_subset@2": 41.9756,
+      "R_subset@3": 61.5881
+    },
+    "text": {
+      "19": 34.0,
+      "FeatureR@1": 22.9132,
+      "R@5": 48.0268,
+      "R@10": 59.8421,
+      "R@50": 80.22,
+      "R@100": 86.6061,
+      "R_subset@1": 64.243,
+      "R_subset@2": 82.7792,
+      "R_subset@3": 91.4614
+    },
+    "mixture": {
+      "19": 35.0,
+      "FeatureR@1": 14.0397,
+      "R@5": 39.4164,
+      "R@10": 53.2648,
+      "R@50": 80.531,
+      "R@100": 87.0127,
+      "R_subset@1": 36.8572,
+      "R_subset@2": 61.0859,
+      "R_subset@3": 78.3784
+    }
+  }
+}
