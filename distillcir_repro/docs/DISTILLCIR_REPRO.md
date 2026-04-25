@@ -39,6 +39,7 @@ bash scripts/train_teacher_llava_phi3_lora_8x3090.sh
 
 This writes a LoRA/projector teacher under:
 `/data2/mingyu/composed_image_retrieval/checkpoint/distillcir_teacher/llava_phi3_mini_lora_lcom/final`
+The default teacher run uses 2807 optimizer updates, approximately one pass over the current cleaned CC3M triplet set at global batch 768.
 
 3. Cache modified-caption embeddings from that trained teacher:
 

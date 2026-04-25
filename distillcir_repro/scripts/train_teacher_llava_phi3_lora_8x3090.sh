@@ -25,7 +25,7 @@ torchrun --standalone --nproc_per_node="$GPUS" src/train_llava_teacher_contrasti
   --batch-size "${PER_GPU_BATCH:-1}" \
   --accum-steps "${ACCUM_STEPS:-96}" \
   --workers "${WORKERS:-2}" \
-  --max-steps "${MAX_STEPS:-50000}" \
+  --max-steps "${MAX_STEPS:-2807}" \
   --lr "${LR:-2e-5}" \
   --dtype fp16 \
   --use-lora \

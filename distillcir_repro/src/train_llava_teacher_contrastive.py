@@ -332,7 +332,7 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--accum-steps", type=int, default=32)
     parser.add_argument("--workers", type=int, default=2)
-    parser.add_argument("--max-steps", type=int, default=50000)
+    parser.add_argument("--max-steps", type=int, default=2807)
     parser.add_argument("--max-length", type=int, default=256)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--wd", type=float, default=0.0)
