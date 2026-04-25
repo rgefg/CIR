@@ -25,10 +25,17 @@ declare -A PID_GPUS=()
 declare -A PID_RESULT=()
 declare -A PID_LOG=()
 declare -A PID_STARTED=()
+declare -A ACTIVE_JOB=()
+declare -A FAILED_JOB=()
 
 status_has_job() {
   local job_id="$1"
   [[ -f "${STATUS_TSV}" ]] && awk -F '\t' -v id="${job_id}" '$1 == id && $6 == "ok" {found=1} END {exit !found}' "${STATUS_TSV}"
+}
+
+status_has_terminal_job() {
+  local job_id="$1"
+  [[ -f "${STATUS_TSV}" ]] && awk -F '\t' -v id="${job_id}" '$1 == id && ($6 == "ok" || $6 == "failed") {found=1} END {exit !found}' "${STATUS_TSV}"
 }
 
 json_result_exists() {
@@ -127,7 +134,7 @@ record_external_rank_suite_k48_if_done() {
 start_job() {
   local job_id="$1" task="$2" dataset="$3" label="$4" need="$5" kind="$6" arg1="${7:-}" arg2="${8:-}"
   local gpus result log_path started
-  if status_has_job "${job_id}"; then
+  if status_has_terminal_job "${job_id}" || [[ -n "${ACTIVE_JOB[${job_id}]:-}" ]] || [[ -n "${FAILED_JOB[${job_id}]:-}" ]]; then
     return 0
   fi
   gpus="$(free_gpus_for "${need}")" || return 1
@@ -171,6 +178,7 @@ start_job() {
   PID_RESULT["${pid}"]="${result}"
   PID_LOG["${pid}"]="${log_path}"
   PID_STARTED["${pid}"]="${started}"
+  ACTIVE_JOB["${job_id}"]="${pid}"
   return 0
 }
 
@@ -199,11 +207,13 @@ reap_done_jobs() {
     status="ok"
     if [[ "${rc}" != "0" ]]; then
       status="failed"
+      FAILED_JOB["${job_id}"]=1
     fi
     append_status "${job_id}" "${task}" "${dataset}" "${label}" "${gpus}" "${status}" "${rc}" "${started}" "${finished}"
     write_record "${job_id}" "${task}" "${dataset}" "${label}" "${gpus}" "${status}" "${rc}" "${started}" "${finished}" "${result}" "${log_path}"
     log "ACCEL_DONE ${job_id} status=${status} exit=${rc}"
     mark_gpus_free "${gpus}"
+    unset "ACTIVE_JOB[${job_id}]"
     unset "PID_JOB[${pid}]" "PID_TASK[${pid}]" "PID_DATASET[${pid}]" "PID_LABEL[${pid}]" "PID_GPUS[${pid}]" "PID_RESULT[${pid}]" "PID_LOG[${pid}]" "PID_STARTED[${pid}]"
   done
 }
@@ -219,7 +229,7 @@ all_queue_done() {
     loss_cirr_fwd_rev_nozero \
     loss_multi_fwd_only \
     loss_multi_fwd_rev_nozero; do
-    status_has_job "${job}" || return 1
+    status_has_terminal_job "${job}" || return 1
   done
   return 0
 }
