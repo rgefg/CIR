@@ -65,3 +65,13 @@ bash scripts/train_student_that_8x3090.sh
 ```
 
 Default global batch is `24 * 8 * 4 = 768`, matching the paper's reported batch size while keeping per-GPU memory conservative for 24GB 3090s. The current cleaned JSONL has about 2.16M usable records, so the default epoch length is 2807 optimizer steps and the default run is 2 epochs.
+
+## 4x RTX 3090 Setup
+
+On this host the measured stable 4-card student setup is:
+
+```bash
+bash scripts/train_student_4x3090_best.sh
+```
+
+It uses physical GPUs `0,1,2,7`, per-GPU batch `32`, global contrastive batch `128`, `AMP_INIT_SCALE=1024`, and gradient clipping at `1.0`. Batch `48` was tested and hit CUDA OOM, so batch `32` is the practical 24GB ceiling. With 2,155,058 usable triplets, one epoch is `ceil(2155058 / 128) = 16837` optimizer steps.

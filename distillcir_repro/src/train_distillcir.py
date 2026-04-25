@@ -59,6 +59,18 @@ def sync_gradients(modules):
             param.grad.div_(world_size)
 
 
+def trainable_parameters(modules):
+    seen = set()
+    params = []
+    for module in modules:
+        for param in module.parameters():
+            if not param.requires_grad or id(param) in seen:
+                continue
+            seen.add(id(param))
+            params.append(param)
+    return params
+
+
 def setup_logging(log_path: Path, rank: int):
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handlers = [logging.StreamHandler()]
@@ -113,8 +125,17 @@ def init_distributed(args):
         args.device = torch.device("cpu")
         return
 
-    torch.cuda.set_device(local_rank)
-    args.device = torch.device("cuda", local_rank)
+    physical_gpus = []
+    if args.physical_gpus:
+        physical_gpus = [int(item) for item in str(args.physical_gpus).split(",") if item.strip()]
+        if len(physical_gpus) < world_size:
+            raise ValueError(
+                f"--physical-gpus needs at least WORLD_SIZE={world_size} ids, got {physical_gpus}"
+            )
+    device_index = physical_gpus[local_rank] if physical_gpus else local_rank
+    torch.cuda.set_device(device_index)
+    args.device = torch.device("cuda", device_index)
+    args.physical_gpu = device_index
     if args.distributed:
         dist.init_process_group(backend=args.dist_backend, init_method="env://")
 
@@ -493,7 +514,22 @@ def train_one_epoch(model, img2text, heads, data, teacher_store, optimizer, scal
         global_step = epoch * num_updates + update_idx
         if args.precision == "amp":
             scaler.unscale_(optimizer)
-        sync_gradients([model, img2text, heads])
+        modules = [model, img2text, heads]
+        sync_gradients(modules)
+        grad_norm = torch.nn.utils.clip_grad_norm_(
+            trainable_parameters(modules),
+            max_norm=float(args.grad_clip_norm),
+            error_if_nonfinite=False,
+        ) if float(args.grad_clip_norm) > 0.0 else torch.tensor(0.0, device=args.device)
+        finite_grad = torch.isfinite(grad_norm).all()
+        if not finite_grad:
+            if is_master():
+                logging.warning("Skipping step=%d due to non-finite grad_norm=%s", global_step, grad_norm)
+            optimizer.zero_grad(set_to_none=True)
+            if args.precision == "amp":
+                scaler.update()
+            continue
+
         scheduler(global_step)
         if args.precision == "amp":
             scaler.step(optimizer)
@@ -599,6 +635,10 @@ def parse_args():
     parser.add_argument("--wd", type=float, default=0.2)
     parser.add_argument("--warmup", type=int, default=1000)
     parser.add_argument("--precision", choices=["amp", "fp32"], default="amp")
+    parser.add_argument("--amp-init-scale", type=float, default=1024.0)
+    parser.add_argument("--amp-growth-factor", type=float, default=2.0)
+    parser.add_argument("--amp-backoff-factor", type=float, default=0.5)
+    parser.add_argument("--amp-growth-interval", type=int, default=2000)
     parser.add_argument("--lora-r", type=int, default=64)
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--lora-dropout", type=float, default=0.0)
@@ -613,6 +653,7 @@ def parse_args():
     parser.add_argument("--teacher-dim", type=int, default=0)
     parser.add_argument("--bidirectional-contrastive", action="store_true", default=False)
     parser.add_argument("--max-logit-scale", type=float, default=100.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--logs", type=str, default="./logs")
     parser.add_argument("--name", type=str, default="DistillCIR_ViTL14_8x3090")
     parser.add_argument("--save-frequency", type=int, default=1)
@@ -621,6 +662,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--dist-backend", type=str, default="nccl")
     parser.add_argument("--allow-cuda-visible-devices", action="store_true", default=False)
+    parser.add_argument(
+        "--physical-gpus",
+        type=str,
+        default="",
+        help="Comma-separated physical GPU ids for torchrun local ranks, e.g. 0,1,2,7. Avoids CUDA_VISIBLE_DEVICES remapping.",
+    )
     parser.add_argument("--dry-run-steps", type=int, default=0)
     args = parser.parse_args()
     defaults = get_default_params(args.model)
@@ -680,7 +727,13 @@ def main():
     )
     total_steps = int(args.wds_epoch_steps) * int(args.epochs)
     scheduler = cosine_lr(optimizer, args.lr, args.warmup, total_steps)
-    scaler = GradScaler(enabled=args.precision == "amp")
+    scaler = GradScaler(
+        enabled=args.precision == "amp",
+        init_scale=float(args.amp_init_scale),
+        growth_factor=float(args.amp_growth_factor),
+        backoff_factor=float(args.amp_backoff_factor),
+        growth_interval=int(args.amp_growth_interval),
+    )
 
     for epoch in range(args.epochs):
         train_one_epoch(model, img2text, heads, data, teacher_store, optimizer, scaler, scheduler, epoch, args)

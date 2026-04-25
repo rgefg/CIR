@@ -35,8 +35,17 @@ def init_dist(args):
     if os.environ.get("CUDA_VISIBLE_DEVICES") and not args.allow_cuda_visible_devices:
         raise RuntimeError("CUDA_VISIBLE_DEVICES is set; unset it to avoid physical GPU remapping.")
     if torch.cuda.is_available():
-        torch.cuda.set_device(args.local_rank)
-        args.device = torch.device("cuda", args.local_rank)
+        physical_gpus = []
+        if args.physical_gpus:
+            physical_gpus = [int(item) for item in str(args.physical_gpus).split(",") if item.strip()]
+            if len(physical_gpus) < args.world_size:
+                raise ValueError(
+                    f"--physical-gpus needs at least WORLD_SIZE={args.world_size} ids, got {physical_gpus}"
+                )
+        device_index = physical_gpus[args.local_rank] if physical_gpus else args.local_rank
+        torch.cuda.set_device(device_index)
+        args.device = torch.device("cuda", device_index)
+        args.physical_gpu = device_index
     else:
         args.device = torch.device("cpu")
     if args.distributed:
@@ -358,6 +367,12 @@ def parse_args():
     parser.add_argument("--log-interval", type=int, default=20)
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--allow-cuda-visible-devices", action="store_true", default=False)
+    parser.add_argument(
+        "--physical-gpus",
+        type=str,
+        default="",
+        help="Comma-separated physical GPU ids for torchrun local ranks, e.g. 0,1,2,7.",
+    )
     return parser.parse_args()
 
 

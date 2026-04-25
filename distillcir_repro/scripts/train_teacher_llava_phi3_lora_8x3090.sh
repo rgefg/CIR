@@ -9,7 +9,15 @@ if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   exit 2
 fi
 
-GPUS="${GPUS:-8}"
+PHYSICAL_GPUS="${PHYSICAL_GPUS:-}"
+if [[ -n "$PHYSICAL_GPUS" ]]; then
+  IFS=',' read -r -a GPU_ID_ARRAY <<< "$PHYSICAL_GPUS"
+  GPUS="${GPUS:-${#GPU_ID_ARRAY[@]}}"
+  PHYSICAL_GPU_ARGS=(--physical-gpus "$PHYSICAL_GPUS")
+else
+  GPUS="${GPUS:-8}"
+  PHYSICAL_GPU_ARGS=()
+fi
 TEACHER_MODEL="${TEACHER_MODEL:-/data2/mingyu/composed_image_retrieval/checkpoint/hf_models/xtuner_llava_phi3_mini_hf}"
 CC3M_JSONL="${CC3M_JSONL:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2__merged_with_cc3m_new.retrieval_clean_v2.jsonl}"
 WDS_SHARDS="${WDS_SHARDS:-/data2/mingyu/composed_image_retrieval/data/wds_cache/cc3m-train-{0000..0575}.tar}"
@@ -33,4 +41,5 @@ torchrun --standalone --nproc_per_node="$GPUS" src/train_llava_teacher_contrasti
   --lora-alpha 128 \
   --lora-dropout 0.05 \
   --train-projector \
+  "${PHYSICAL_GPU_ARGS[@]}" \
   "$@"

@@ -8,12 +8,26 @@ set -euo pipefail
 cd "$(dirname "$0")"
 export PYTHONPATH="$PWD/src:$PWD:${PYTHONPATH:-}"
 
-GPUS="${GPUS:-8}"
+PHYSICAL_GPUS="${PHYSICAL_GPUS:-}"
+if [[ -n "$PHYSICAL_GPUS" ]]; then
+  IFS=',' read -r -a GPU_ID_ARRAY <<< "$PHYSICAL_GPUS"
+  GPUS="${GPUS:-${#GPU_ID_ARRAY[@]}}"
+  PHYSICAL_GPU_ARGS=(--physical-gpus "$PHYSICAL_GPUS")
+else
+  GPUS="${GPUS:-8}"
+  PHYSICAL_GPU_ARGS=()
+fi
 PER_GPU_BATCH="${PER_GPU_BATCH:-24}"
 ACCUM_STEPS="${ACCUM_STEPS:-4}"
 WORKERS="${WORKERS:-4}"
 EPOCHS="${EPOCHS:-2}"
 WDS_EPOCH_STEPS="${WDS_EPOCH_STEPS:-2807}"
+LR="${LR:-2e-5}"
+WARMUP="${WARMUP:-1000}"
+ALPHA_REASON="${ALPHA_REASON:-1.0}"
+BETA_FEATURE="${BETA_FEATURE:-1.0}"
+AMP_INIT_SCALE="${AMP_INIT_SCALE:-1024}"
+GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
 
 CC3M_JSONL="${CC3M_JSONL:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2__merged_with_cc3m_new.retrieval_clean_v2.jsonl}"
 WDS_SHARDS="${WDS_SHARDS:-/data2/mingyu/composed_image_retrieval/data/wds_cache/cc3m-train-{0000..0575}.tar}"
@@ -50,21 +64,24 @@ torchrun --standalone --nproc_per_node="$GPUS" src/train_distillcir.py \
   --retrieval-prompt-connector "$CONNECTOR" \
   --reason-prompt-connector "$REASON_CONNECTOR" \
   --reason-prompt-tokens 8 \
-  --alpha-reason 1.0 \
-  --beta-feature 1.0 \
+  --alpha-reason "$ALPHA_REASON" \
+  --beta-feature "$BETA_FEATURE" \
   --batch-size "$PER_GPU_BATCH" \
   --accum-steps "$ACCUM_STEPS" \
   --epochs "$EPOCHS" \
   --wds-epoch-steps "$WDS_EPOCH_STEPS" \
   --workers "$WORKERS" \
-  --lr 2e-5 \
+  --lr "$LR" \
   --wd 0.2 \
-  --warmup 1000 \
+  --warmup "$WARMUP" \
   --precision amp \
+  --amp-init-scale "$AMP_INIT_SCALE" \
+  --grad-clip-norm "$GRAD_CLIP_NORM" \
   --lora-r 64 \
   --lora-alpha 16 \
   --lora-dropout 0.0 \
   --logs ./logs \
   --name "$RUN_NAME" \
   --log-interval 20 \
+  "${PHYSICAL_GPU_ARGS[@]}" \
   "$@"
