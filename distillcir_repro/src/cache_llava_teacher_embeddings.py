@@ -20,7 +20,7 @@ def init_dist():
     return rank, world_size, local_rank
 
 
-def read_jsonl_for_rank(path: Path, rank: int, world_size: int):
+def read_jsonl_for_rank(path: Path, rank: int, world_size: int, caption_template: str):
     records = []
     with path.open("r", encoding="utf-8") as handle:
         for index, line in enumerate(handle):
@@ -31,8 +31,9 @@ def read_jsonl_for_rank(path: Path, rank: int, world_size: int):
             caption = obj.get("modified_caption") or obj.get("caption") or obj.get("text") or ""
             if isinstance(caption, dict):
                 caption = caption.get("modified_caption") or caption.get("caption") or caption.get("text") or ""
-            if sample_id and str(caption).strip():
-                records.append((sample_id, str(caption).strip()))
+            caption = str(caption).strip()
+            if sample_id and caption:
+                records.append((sample_id, caption_template.format(caption=caption)))
     return records
 
 
@@ -110,6 +111,11 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-length", type=int, default=128)
     parser.add_argument("--dtype", choices=["fp16", "bf16", "fp32"], default="fp16")
+    parser.add_argument(
+        "--caption-prompt-template",
+        default="Summarize the caption for retrieval: {caption}",
+        help="Prompt used for teacher modified-caption embeddings.",
+    )
     args = parser.parse_args()
 
     rank, world_size, local_rank = init_dist()
@@ -117,7 +123,7 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    records = read_jsonl_for_rank(Path(args.jsonl), rank, world_size)
+    records = read_jsonl_for_rank(Path(args.jsonl), rank, world_size, args.caption_prompt_template)
     tokenizer, model = load_tokenizer_and_model(args.model_path, args.adapter_path, args.dtype)
     model.to(device)
     model.eval()
@@ -166,4 +172,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

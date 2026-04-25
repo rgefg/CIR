@@ -72,6 +72,20 @@ def setup_logging(log_path: Path, rank: int):
     )
 
 
+def jsonable_args(args):
+    clean = {}
+    for key, value in vars(args).items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            clean[key] = value
+        elif isinstance(value, (list, tuple)):
+            clean[key] = list(value)
+        elif isinstance(value, dict):
+            clean[key] = value
+        else:
+            clean[key] = str(value)
+    return clean
+
+
 def seed_everything(seed: int, rank: int):
     final_seed = int(seed) + int(rank)
     random.seed(final_seed)
@@ -560,7 +574,7 @@ def parse_args():
     parser.add_argument("--pic2word-pretrained", type=str, default=None)
     parser.add_argument("--img2text-arch", choices=["im2text", "phi"], default="im2text")
     parser.add_argument("--img2text-pretrained", type=str, default=None)
-    parser.add_argument("--middle-dim", "--middle_dim", dest="middle_dim", type=int, default=768)
+    parser.add_argument("--middle-dim", "--middle_dim", dest="middle_dim", type=int, default=512)
     parser.add_argument("--n-layer", type=int, default=2)
     parser.add_argument("--droprate", type=float, default=0.0)
     parser.add_argument("--cc3m-cir-jsonl", type=str, required=True)
@@ -573,11 +587,11 @@ def parse_args():
     parser.add_argument("--wds-resampled", action="store_true", default=True)
     parser.add_argument("--no-wds-resampled", dest="wds_resampled", action="store_false")
     parser.add_argument("--wds-deterministic", action="store_true", default=False)
-    parser.add_argument("--wds-epoch-steps", type=int, default=3385)
+    parser.add_argument("--wds-epoch-steps", type=int, default=2807)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=24)
     parser.add_argument("--accum-steps", type=int, default=4)
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.98)
@@ -626,10 +640,10 @@ def main():
     log_physical_gpu_state()
 
     if is_master():
-        logging.info("Args:\n%s", json.dumps(vars(args), indent=2, sort_keys=True))
+        logging.info("Args:\n%s", json.dumps(jsonable_args(args), indent=2, sort_keys=True))
         Path(args.checkpoint_path).mkdir(parents=True, exist_ok=True)
         with (Path(args.logs) / args.name / "params.json").open("w", encoding="utf-8") as handle:
-            json.dump(vars(args), handle, indent=2, sort_keys=True)
+            json.dump(jsonable_args(args), handle, indent=2, sort_keys=True)
 
     model, img2text, preprocess_train, _ = build_clip_and_projection(args)
     teacher_store = None

@@ -65,6 +65,20 @@ def seed_all(seed, rank):
     torch.cuda.manual_seed_all(value)
 
 
+def jsonable_args(args):
+    clean = {}
+    for key, value in vars(args).items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            clean[key] = value
+        elif isinstance(value, (list, tuple)):
+            clean[key] = list(value)
+        elif isinstance(value, dict):
+            clean[key] = value
+        else:
+            clean[key] = str(value)
+    return clean
+
+
 def collate(samples):
     return {
         "id": [item["id"] for item in samples],
@@ -254,14 +268,17 @@ def train(args):
                     model,
                     processor,
                     batch["images"],
-                    batch["instruction"],
+                    [args.query_prompt_template.format(instruction=instruction) for instruction in batch["instruction"]],
                     args.device,
                     args.max_length,
                 )
                 target = encode_caption(
                     model,
                     tokenizer,
-                    batch["modified_caption"],
+                    [
+                        args.caption_prompt_template.format(caption=caption)
+                        for caption in batch["modified_caption"]
+                    ],
                     args.device,
                     args.max_length,
                 )
@@ -320,6 +337,14 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--wd", type=float, default=0.0)
     parser.add_argument("--temperature", type=float, default=0.07)
+    parser.add_argument(
+        "--query-prompt-template",
+        default="Apply the prompt: {instruction} to the image. Provide one word for the conditioned image:",
+    )
+    parser.add_argument(
+        "--caption-prompt-template",
+        default="Summarize the caption for retrieval: {caption}",
+    )
     parser.add_argument("--dtype", choices=["fp16", "bf16", "fp32"], default="fp16")
     parser.add_argument("--use-lora", action="store_true", default=True)
     parser.add_argument("--no-lora", dest="use_lora", action="store_false")
@@ -344,7 +369,7 @@ def main():
     if is_master():
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
         (Path(args.output_dir) / "teacher_args.json").write_text(
-            json.dumps(vars(args), indent=2, sort_keys=True),
+            json.dumps(jsonable_args(args), indent=2, sort_keys=True),
             encoding="utf-8",
         )
     train(args)

@@ -12,8 +12,8 @@ GPUS="${GPUS:-8}"
 PER_GPU_BATCH="${PER_GPU_BATCH:-24}"
 ACCUM_STEPS="${ACCUM_STEPS:-4}"
 WORKERS="${WORKERS:-4}"
-EPOCHS="${EPOCHS:-3}"
-WDS_EPOCH_STEPS="${WDS_EPOCH_STEPS:-3385}"
+EPOCHS="${EPOCHS:-2}"
+WDS_EPOCH_STEPS="${WDS_EPOCH_STEPS:-2807}"
 
 CC3M_JSONL="${CC3M_JSONL:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2__merged_with_cc3m_new.retrieval_clean_v2.jsonl}"
 WDS_SHARDS="${WDS_SHARDS:-/data2/mingyu/composed_image_retrieval/data/wds_cache/cc3m-train-{0000..0575}.tar}"
@@ -41,7 +41,7 @@ torchrun --standalone --nproc_per_node="$GPUS" src/train_distillcir.py \
   --model ViT-L/14 \
   --pic2word-pretrained "$PIC2WORD_CKPT" \
   --img2text-arch im2text \
-  --middle-dim 768 \
+  --middle-dim 512 \
   --n-layer 2 \
   --droprate 0.0 \
   --cc3m-cir-jsonl "$CC3M_JSONL" \

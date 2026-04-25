@@ -9,6 +9,8 @@ This folder is an isolated copy of the Pic2Word-based code plus a DistillCIR stu
 - `Lfea`: student composed embedding projected to the cached LLaVA teacher caption embedding space.
 - CLIP ViT-L/14 + Pic2Word projection module, LoRA on CLIP visual/text linear layers, full projection-module training.
 - `torchrun` DDP launch for physical GPUs 0-7 without `CUDA_VISIBLE_DEVICES` remapping.
+- Supplemental-aligned DistillCIR hyperparameters: FP16, LoRA r=64 alpha=16, batch size 768, learning rate 2e-5, cosine schedule, 2 epochs.
+- Supplemental-aligned teacher prompts: query prompt `Apply the prompt: {instruction} to the image. Provide one word for the conditioned image:` and target prompt `Summarize the caption for retrieval: {caption}`.
 
 ## Required Artifacts
 
@@ -61,4 +63,4 @@ CIRCO/FashionIQ setup uses `that`:
 bash scripts/train_student_that_8x3090.sh
 ```
 
-Default global batch is `24 * 8 * 4 = 768`, matching the paper's reported batch size while keeping per-GPU memory conservative for 24GB 3090s.
+Default global batch is `24 * 8 * 4 = 768`, matching the paper's reported batch size while keeping per-GPU memory conservative for 24GB 3090s. The current cleaned JSONL has about 2.16M usable records, so the default epoch length is 2807 optimizer steps and the default run is 2 epochs.
