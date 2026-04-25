@@ -226,7 +226,7 @@ merge_checkpoint() {
 
 eval_cirr_checkpoint() {
   local gpu="$1" ckpt="$2" result_json="$3" connector="$4" log_path="$5"
-  CUDA_VISIBLE_DEVICES="${gpu}" "${PY}" "${ROOT}/src/eval_retrieval.py" \
+  "${PY}" "${ROOT}/src/eval_retrieval.py" \
     --resume "${ckpt}" \
     --openai-pretrained \
     --model "ViT-L/14" \
@@ -234,7 +234,7 @@ eval_cirr_checkpoint() {
     --middle_dim 3072 \
     --img2text-pretrained "${SEARLE}" \
     --eval-mode cirr \
-    --gpu 0 \
+    --gpu "${gpu}" \
     --batch-size "${CIRR_BATCH_SIZE}" \
     --workers "${WORKERS}" \
     --retrieval-prompt-connector "${connector}" >> "${log_path}" 2>&1
@@ -243,10 +243,10 @@ eval_cirr_checkpoint() {
 
 eval_suite_checkpoint() {
   local gpu="$1" ckpt="$2" result_json="$3" connector="$4" log_path="$5"
-  CUDA_VISIBLE_DEVICES="${gpu}" "${PY}" "${ROOT}/data/eval_multidataset_suite.py" \
+  "${PY}" "${ROOT}/data/eval_multidataset_suite.py" \
     --resume "${ckpt}" \
     --output-json "${result_json}" \
-    --gpu 0 \
+    --gpu "${gpu}" \
     --batch-size "${SUITE_BATCH_SIZE}" \
     --genecis-batch-size "${GENECIS_BATCH_SIZE}" \
     --workers "${WORKERS}" \
@@ -319,9 +319,9 @@ run_hard_analysis() {
       "${MULTI_FULL_DIR}/checkpoints/epoch_0_step_1400_geo_lora_ema.pt" \
       "${multi_merged}" \
       32
-    CUDA_VISIBLE_DEVICES="${gpu}" "${PY}" "${ROOT}/data/find_hard_distractor_cases.py" \
+    "${PY}" "${ROOT}/data/find_hard_distractor_cases.py" \
       --output-dir "${RESULT_DIR}/hard_analysis" \
-      --gpu 0 \
+      --gpu "${gpu}" \
       --batch-size "${CIRR_BATCH_SIZE}" \
       --genecis-batch-size "${GENECIS_BATCH_SIZE}" \
       --workers "${WORKERS}" \
