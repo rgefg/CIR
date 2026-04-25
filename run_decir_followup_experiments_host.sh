@@ -45,8 +45,15 @@ mkdir -p "${RESULT_DIR}/records" "${RESULT_DIR}/job_logs" "${TMP_DIR}"
 RESULTS_JSONL="${RESULT_DIR}/results.jsonl"
 STATUS_TSV="${RESULT_DIR}/status.tsv"
 PROGRESS_MD="${RESULT_DIR}/PROGRESS.md"
-: > "${RESULTS_JSONL}"
-printf 'job_id\ttask\tdataset\tlabel\tgpu\tstatus\texit_code\tstarted_at\tfinished_at\n' > "${STATUS_TSV}"
+if [[ "${SOURCE_ONLY:-0}" != "1" ]]; then
+  : > "${RESULTS_JSONL}"
+  printf 'job_id\ttask\tdataset\tlabel\tgpu\tstatus\texit_code\tstarted_at\tfinished_at\n' > "${STATUS_TSV}"
+else
+  touch "${RESULTS_JSONL}"
+  if [[ ! -f "${STATUS_TSV}" ]]; then
+    printf 'job_id\ttask\tdataset\tlabel\tgpu\tstatus\texit_code\tstarted_at\tfinished_at\n' > "${STATUS_TSV}"
+  fi
+fi
 
 log() {
   local msg="$*"
