@@ -30,7 +30,9 @@ AMP_INIT_SCALE="${AMP_INIT_SCALE:-1024}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
 
 CC3M_JSONL="${CC3M_JSONL:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2__merged_with_cc3m_new.retrieval_clean_v2.jsonl}"
-WDS_SHARDS="${WDS_SHARDS:-/data2/mingyu/composed_image_retrieval/data/wds_cache/cc3m-train-{0000..0575}.tar}"
+if [[ -z "${WDS_SHARDS:-}" ]]; then
+  WDS_SHARDS='/data2/mingyu/composed_image_retrieval/data/wds_cache/cc3m-train-{0000..0575}.tar'
+fi
 PIC2WORD_CKPT="${PIC2WORD_CKPT:-/data2/mingyu/composed_image_retrieval/checkpoint/pic2word_model.pt}"
 TEACHER_CACHE="${TEACHER_CACHE:-/data2/mingyu/composed_image_retrieval/checkpoint/distillcir_teacher/llava_phi3_mini_cc3m_cache}"
 

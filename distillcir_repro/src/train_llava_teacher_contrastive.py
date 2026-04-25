@@ -143,11 +143,33 @@ def load_model_and_processor(args):
     if hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
 
+    vision_config = getattr(model.config, "vision_config", None)
+    if getattr(processor, "patch_size", None) is None and vision_config is not None:
+        processor.patch_size = getattr(vision_config, "patch_size", None)
+    if getattr(processor, "vision_feature_select_strategy", None) is None:
+        processor.vision_feature_select_strategy = getattr(
+            model.config, "vision_feature_select_strategy", "default"
+        )
+    if not getattr(processor, "num_additional_image_tokens", None):
+        processor.num_additional_image_tokens = 1
+
     for param in model.parameters():
         param.requires_grad = False
 
     if args.use_lora:
+        # This environment has bitsandbytes installed without the matching
+        # triton.ops package. We train ordinary fp16 LoRA, so keep PEFT from
+        # probing the broken bnb backend during adapter injection.
+        import peft.import_utils as peft_import_utils
+        import peft.tuners.lora.model as peft_lora_model
         from peft import LoraConfig, get_peft_model
+
+        peft_import_utils.is_bnb_available.cache_clear()
+        peft_import_utils.is_bnb_4bit_available.cache_clear()
+        peft_import_utils.is_bnb_available = lambda: False
+        peft_import_utils.is_bnb_4bit_available = lambda: False
+        peft_lora_model.is_bnb_available = lambda: False
+        peft_lora_model.is_bnb_4bit_available = lambda: False
 
         config = LoraConfig(
             r=args.lora_r,
@@ -163,6 +185,10 @@ def load_model_and_processor(args):
     if args.train_projector and hasattr(model, "multi_modal_projector"):
         for param in model.multi_modal_projector.parameters():
             param.requires_grad = True
+
+    for param in model.parameters():
+        if param.requires_grad:
+            param.data = param.data.float()
 
     return processor, model
 
@@ -258,13 +284,15 @@ def train(args):
     if is_master():
         logging.info("Teacher trainable params: %.2fM", sum(p.numel() for p in trainable) / 1e6)
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.wd)
-    scaler = GradScaler(enabled=args.dtype == "fp16")
+    scaler = GradScaler(enabled=args.dtype == "fp16", init_scale=args.amp_init_scale)
     dataloader = build_wds(args)
     iterator = iter(dataloader)
 
     optimizer.zero_grad(set_to_none=True)
     end = time.time()
     for step in range(args.max_steps):
+        if args.device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(args.device)
         for _ in range(args.accum_steps):
             try:
                 batch = next(iterator)
@@ -297,18 +325,43 @@ def train(args):
 
         scaler.unscale_(optimizer)
         sync_grads(model)
-        scaler.step(optimizer)
+        if args.grad_clip_norm > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip_norm)
+        else:
+            grad_norm = torch.zeros((), device=args.device)
+            for param in trainable:
+                if param.grad is not None:
+                    grad_norm = grad_norm + param.grad.detach().float().pow(2).sum()
+            grad_norm = grad_norm.sqrt()
+        finite_grad = torch.isfinite(grad_norm).to(args.device)
+        if is_dist():
+            dist.all_reduce(finite_grad, op=dist.ReduceOp.MIN)
+        if bool(finite_grad.item()):
+            scaler.step(optimizer)
+        elif is_master():
+            logging.warning("teacher step=%d skipped non-finite grad_norm=%s", step, grad_norm.item())
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+        if args.device.type == "cuda":
+            peak_mem_mb = torch.tensor(
+                torch.cuda.max_memory_allocated(args.device) / (1024**2),
+                device=args.device,
+            )
+            if is_dist():
+                dist.all_reduce(peak_mem_mb, op=dist.ReduceOp.MAX)
+        else:
+            peak_mem_mb = torch.tensor(0.0)
 
         if is_master() and step % args.log_interval == 0:
             acc = (logits.argmax(dim=-1) == labels).float().mean().item()
             logging.info(
-                "teacher step=%d/%d loss=%.4f acc=%.3f time=%.2fs",
+                "teacher step=%d/%d loss=%.4f acc=%.3f grad_norm=%.3f peak_mem=%.0fMiB time=%.2fs",
                 step,
                 args.max_steps,
                 loss.detach().item() * args.accum_steps,
                 acc,
+                grad_norm.detach().float().item(),
+                peak_mem_mb.detach().float().item(),
                 time.time() - end,
             )
             end = time.time()
@@ -342,9 +395,11 @@ def parse_args():
     parser.add_argument("--accum-steps", type=int, default=32)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--max-steps", type=int, default=2807)
-    parser.add_argument("--max-length", type=int, default=256)
+    parser.add_argument("--max-length", type=int, default=1024)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--wd", type=float, default=0.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--amp-init-scale", type=float, default=1024.0)
     parser.add_argument("--temperature", type=float, default=0.07)
     parser.add_argument(
         "--query-prompt-template",

@@ -9,15 +9,21 @@ import torch.distributed as dist
 from tqdm import tqdm
 
 
-def init_dist():
+def init_dist(physical_gpus: str = ""):
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    device_index = local_rank
     if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
+        if physical_gpus:
+            gpu_ids = [int(item) for item in physical_gpus.split(",") if item.strip()]
+            if len(gpu_ids) < world_size:
+                raise ValueError(f"--physical-gpus needs at least WORLD_SIZE={world_size} ids, got {gpu_ids}")
+            device_index = gpu_ids[local_rank]
+        torch.cuda.set_device(device_index)
     if world_size > 1:
         dist.init_process_group(backend="nccl", init_method="env://")
-    return rank, world_size, local_rank
+    return rank, world_size, device_index
 
 
 def read_jsonl_for_rank(path: Path, rank: int, world_size: int, caption_template: str):
@@ -71,8 +77,16 @@ def load_tokenizer_and_model(model_path: str, adapter_path: str, dtype: str):
         )
 
     if adapter_path:
+        import peft.import_utils as peft_import_utils
+        import peft.tuners.lora.model as peft_lora_model
         from peft import PeftModel
 
+        peft_import_utils.is_bnb_available.cache_clear()
+        peft_import_utils.is_bnb_4bit_available.cache_clear()
+        peft_import_utils.is_bnb_available = lambda: False
+        peft_import_utils.is_bnb_4bit_available = lambda: False
+        peft_lora_model.is_bnb_available = lambda: False
+        peft_lora_model.is_bnb_4bit_available = lambda: False
         model = PeftModel.from_pretrained(model, adapter_path)
     return tokenizer, model
 
@@ -111,6 +125,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-length", type=int, default=128)
     parser.add_argument("--dtype", choices=["fp16", "bf16", "fp32"], default="fp16")
+    parser.add_argument("--physical-gpus", default="")
     parser.add_argument(
         "--caption-prompt-template",
         default="Summarize the caption for retrieval: {caption}",
@@ -118,8 +133,8 @@ def main():
     )
     args = parser.parse_args()
 
-    rank, world_size, local_rank = init_dist()
-    device = torch.device("cuda", local_rank) if torch.cuda.is_available() else torch.device("cpu")
+    rank, world_size, device_index = init_dist(args.physical_gpus)
+    device = torch.device("cuda", device_index) if torch.cuda.is_available() else torch.device("cpu")
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
