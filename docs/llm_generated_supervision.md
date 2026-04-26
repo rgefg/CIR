@@ -64,10 +64,12 @@ The retrieval-cleaned merged file applies these filters:
 
 ## Examples
 
+The five appendix examples below cover color change, object replacement, action/posture change, background/scene change, and style/material change.
+
 ```jsonl
-{"id":"000003390","instruction":"Change the man's attire to a business suit.","modified_caption":"A man in a business suit conducts business during an event.","reverse_instruction":"Change the man's attire to non-business suit attire"}
-{"id":"000007547","instruction":"Change the rehearsal setting to take place at night.","modified_caption":"Dancers rehearse for a performance at night.","reverse_instruction":"Change the rehearsal setting to day time."}
-{"id":"000020829","instruction":"Change the time of day from 'a week' to 'on a sunny afternoon'.","modified_caption":"actor arrives on a sunny afternoon to a screening","reverse_instruction":"Change the time of day to 'a week'."}
-{"id":"000015554","instruction":"Change the color of the brick wall from red to blue.","modified_caption":"a blue brick wall from a building","reverse_instruction":"Change the color of the brick wall to red"}
-{"id":"000018986","instruction":"Change the color of the patterned piece from blue and white to green and black.","modified_caption":"In the sea, she showcased her flat stomach in a green and black patterned piece as she took to the sea for a paddle.","reverse_instruction":"Change the color of the patterned piece from green and black to blue and white"}
+{"category":"color change","id":"000020618","instruction":"Change the color of the umbrella from red to blue.","modified_caption":"An open blue umbrella with a shadow.","reverse_instruction":"Change the color of the umbrella from blue to red"}
+{"category":"object replacement","id":"000042412","instruction":"Replace the broom with a shovel for clearing snow.","modified_caption":"A worker clears snow off the sidewalk with a shovel.","reverse_instruction":"Replace the shovel with a broom for clearing snow."}
+{"category":"action/posture change","id":"000050032","instruction":"Change the dog's posture from standing to sitting.","modified_caption":"A dog sits on a balcony looking down.","reverse_instruction":"Change the dog's posture from sitting to standing"}
+{"category":"background/scene change","id":"000076808","instruction":"Change the river to a lake.","modified_caption":"A young man struggles to row through a lake.","reverse_instruction":"Change the lake to a river"}
+{"category":"style/material change","id":"000057407","instruction":"Change the material of the statue from stone to gold.","modified_caption":"A gold statue of a builder at the shrine.","reverse_instruction":"Change the material of the statue to stone"}
 ```
