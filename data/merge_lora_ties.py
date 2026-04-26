@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import torch
-from peft.utils.merge_utils import ties
+from peft.utils.merge_utils import dare_linear, dare_ties, magnitude_prune, task_arithmetic, ties
 
 
 def _load_checkpoint(path: Path):
@@ -119,6 +119,21 @@ def _svd_topk_matrix(mat: torch.Tensor, rank_keep: int, rescale: bool = False) -
    return truncated / keep_ratio
 
 
+def _breadcrumbs_prune(tensor: torch.Tensor, bottom_quantile: float, top_quantile: float) -> torch.Tensor:
+   """Model Breadcrumbs-style mask: remove small noise and large outliers."""
+   if tensor.numel() == 0:
+      return tensor
+   bottom_quantile = float(max(0.0, min(1.0, bottom_quantile)))
+   top_quantile = float(max(0.0, min(1.0, top_quantile)))
+   if bottom_quantile + top_quantile >= 1.0:
+      raise ValueError("breadcrumbs bottom + top quantiles must be < 1.0")
+   abs_flat = tensor.abs().reshape(-1).float()
+   low = torch.quantile(abs_flat, bottom_quantile) if bottom_quantile > 0 else torch.tensor(0.0)
+   high = torch.quantile(abs_flat, 1.0 - top_quantile) if top_quantile > 0 else torch.tensor(float("inf"))
+   mask = (tensor.abs() >= low.to(tensor.device)) & (tensor.abs() <= high.to(tensor.device))
+   return torch.where(mask, tensor, torch.zeros_like(tensor))
+
+
 def main() -> None:
    parser = argparse.ArgumentParser(description="True LoRA merge via TIES on delta weights (B@A), then SVD back to A/B.")
    parser.add_argument("--ckpt-a", type=Path, required=True, help="Checkpoint A path.")
@@ -131,7 +146,19 @@ def main() -> None:
       "--merge-mode",
       type=str,
       default="ties",
-      choices=["ties", "shared_b_sum_a", "shared_b_svd_a", "hybrid_layerwise", "hybrid_layerwise_svd_a", "shared_a_sum_b"],
+      choices=[
+         "ties",
+         "task_arithmetic",
+         "magnitude_prune",
+         "dare_linear",
+         "dare_ties",
+         "breadcrumbs",
+         "shared_b_sum_a",
+         "shared_b_svd_a",
+         "hybrid_layerwise",
+         "hybrid_layerwise_svd_a",
+         "shared_a_sum_b",
+      ],
       help="Use TIES in delta space, or keep base B fixed and sum only A for Shared-B LoRA.",
    )
    parser.add_argument(
@@ -154,6 +181,19 @@ def main() -> None:
       default=False,
       help="Rescale the truncated shallow-layer merged A by 1 / keep_ratio after SVD-topk.",
    )
+   parser.add_argument("--seed", type=int, default=3407, help="Random seed used by stochastic merge methods such as DARE.")
+   parser.add_argument(
+      "--breadcrumbs-bottom-quantile",
+      type=float,
+      default=0.10,
+      help="For merge-mode=breadcrumbs, prune task-vector entries below this absolute-value quantile.",
+   )
+   parser.add_argument(
+      "--breadcrumbs-top-quantile",
+      type=float,
+      default=0.01,
+      help="For merge-mode=breadcrumbs, prune task-vector entries above this absolute-value quantile.",
+   )
    parser.add_argument("--text-only", action="store_true", default=False, help="Merge only text encoder LoRA pairs.")
    parser.add_argument("--all-lora", action="store_true", default=False, help="Merge both text and visual LoRA pairs.")
    parser.add_argument("--base", type=str, default="b", choices=["a", "b"], help="Output structure base checkpoint.")
@@ -174,6 +214,7 @@ def main() -> None:
       help="When base checkpoint is full, save only the tensors required for eval.",
    )
    args = parser.parse_args()
+   torch.manual_seed(int(args.seed))
 
    print(f"loading ckpt_a: {args.ckpt_a}", flush=True)
    ckpt_a = _load_checkpoint(args.ckpt_a)
@@ -290,19 +331,47 @@ def main() -> None:
       merged_AB[kA] = merged_A.to(dtype=out_dtype)
       merged_AB[kB] = b_ref.to(dtype=out_dtype)
 
-   def _write_delta_ties(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor]):
+   def _merge_delta_tensors(delta_a_eff: torch.Tensor, delta_b_eff: torch.Tensor, mode: str) -> torch.Tensor:
+      if mode == "task_arithmetic":
+         return task_arithmetic([delta_a_eff, delta_b_eff], weights=w)
+      if mode == "magnitude_prune":
+         return magnitude_prune([delta_a_eff, delta_b_eff], weights=w, density=args.density)
+      if mode == "dare_linear":
+         return dare_linear([delta_a_eff, delta_b_eff], weights=w, density=args.density)
+      if mode == "dare_ties":
+         return dare_ties(
+            [delta_a_eff, delta_b_eff],
+            weights=w,
+            density=args.density,
+            majority_sign_method=args.majority_sign_method,
+         )
+      if mode == "breadcrumbs":
+         pruned_a = _breadcrumbs_prune(
+            delta_a_eff,
+            bottom_quantile=args.breadcrumbs_bottom_quantile,
+            top_quantile=args.breadcrumbs_top_quantile,
+         )
+         pruned_b = _breadcrumbs_prune(
+            delta_b_eff,
+            bottom_quantile=args.breadcrumbs_bottom_quantile,
+            top_quantile=args.breadcrumbs_top_quantile,
+         )
+         return task_arithmetic([pruned_a, pruned_b], weights=w)
+      return ties(
+         [delta_a_eff, delta_b_eff],
+         weights=w,
+         density=args.density,
+         majority_sign_method=args.majority_sign_method,
+      )
+
+   def _write_delta_merge(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor], mode: str):
       aA = pa["A"].float()
       aB = pa["B"].float()
       bA = pb["A"].float()
       bB = pb["B"].float()
       delta_a_eff = scale_a * (aB @ aA)
       delta_b_eff = scale_b * (bB @ bA)
-      delta_m_eff = ties(
-         [delta_a_eff, delta_b_eff],
-         weights=w,
-         density=args.density,
-         majority_sign_method=args.majority_sign_method,
-      )
+      delta_m_eff = _merge_delta_tensors(delta_a_eff, delta_b_eff, mode)
       delta_m = delta_m_eff / base_scale
       rank_target = pair_b[prefix]["A"].shape[0] if args.base == "b" else pair_a[prefix]["A"].shape[0]
       out_dtype = pair_b[prefix]["A"].dtype if args.base == "b" else pair_a[prefix]["A"].dtype
@@ -329,7 +398,7 @@ def main() -> None:
             _write_shared_b_sum(p, pair_a[p], pair_b[p])
          else:
             deep_ties_prefixes += 1
-            _write_delta_ties(p, pair_a[p], pair_b[p])
+            _write_delta_merge(p, pair_a[p], pair_b[p], "ties")
       elif effective_merge_mode == "hybrid_layerwise_svd_a":
          layer_idx = _text_resblock_index(p)
          if layer_idx is not None and layer_idx < int(args.shared_b_num_layers):
@@ -337,9 +406,9 @@ def main() -> None:
             _write_shared_b_svd_a(p, pair_a[p], pair_b[p])
          else:
             deep_ties_prefixes += 1
-            _write_delta_ties(p, pair_a[p], pair_b[p])
+            _write_delta_merge(p, pair_a[p], pair_b[p], "ties")
       else:
-         _write_delta_ties(p, pair_a[p], pair_b[p])
+         _write_delta_merge(p, pair_a[p], pair_b[p], effective_merge_mode)
 
    if args.include_b_only:
       for p in only_b:
@@ -382,6 +451,8 @@ def main() -> None:
             delta_b_eff = scale_b * (bB @ bA)
             delta_m = (weight_b * delta_b_eff) / base_scale
             rank_target = pb["A"].shape[0]
+            delta_m_eff = _merge_delta_tensors(torch.zeros_like(delta_b_eff), delta_b_eff, effective_merge_mode)
+            delta_m = delta_m_eff / base_scale
             mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype)
             merged_AB[kA] = mA
             merged_AB[kB] = mB
@@ -438,6 +509,9 @@ def main() -> None:
    print(f"shared_b_num_layers: {args.shared_b_num_layers}")
    print(f"svd_topk_rank: {args.svd_topk_rank}")
    print(f"svd_rescale: {args.svd_rescale}")
+   print(f"seed: {args.seed}")
+   print(f"breadcrumbs_bottom_quantile: {args.breadcrumbs_bottom_quantile}")
+   print(f"breadcrumbs_top_quantile: {args.breadcrumbs_top_quantile}")
    print(f"shallow_shared_prefixes: {shallow_shared_prefixes}")
    print(f"deep_ties_prefixes: {deep_ties_prefixes}")
    print(f"shared_b_mismatch_prefixes: {shared_b_mismatch_prefixes}")
