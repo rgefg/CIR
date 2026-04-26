@@ -352,6 +352,11 @@ def eval_genecis(model, img2text, preprocess, gpu, batch_size, workers):
 def main():
     cli_args = parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    if torch.cuda.is_available() and cli_args.gpu is not None:
+        # model.clip.load() moves the backbone to the current CUDA device before
+        # eval_retrieval.load_model() later calls .cuda(args.gpu). Set it here
+        # so multi-dataset eval does not silently allocate on cuda:0.
+        torch.cuda.set_device(cli_args.gpu)
     eval_args = build_eval_args(cli_args)
     model, img2text, preprocess = load_model(eval_args)
     model.eval()

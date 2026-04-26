@@ -43,12 +43,19 @@ def parse_args():
     parser.add_argument("--idle-mem-mb", type=int, default=200)
     parser.add_argument("--poll-seconds", type=int, default=60)
     parser.add_argument("--step", type=int, default=1400)
+    parser.add_argument("--eval-scope", type=str, default="all", choices=["all", "cirr", "multi"])
     parser.add_argument("--density", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=3407)
     parser.add_argument("--batch-size", type=int, default=48)
     parser.add_argument("--multi-batch-size", type=int, default=56)
     parser.add_argument("--genecis-batch-size", type=int, default=32)
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument(
+        "--merge-on-gpu",
+        action="store_true",
+        default=False,
+        help="Run dense LoRA merge/SVD on the selected physical GPU instead of CPU.",
+    )
     parser.add_argument("--cirr-ckpt-dir", type=Path, default=DEFAULT_CIRR_DIR)
     parser.add_argument("--multi-ckpt-dir", type=Path, default=DEFAULT_MULTI_DIR)
     return parser.parse_args()
@@ -136,7 +143,7 @@ def checkpoint_pair(ckpt_dir, step):
     return ckpt_dir / f"epoch_0_step_{step}.pt", ckpt_dir / f"epoch_0_step_{step}_geo_lora_ema.pt"
 
 
-def merge_checkpoint(method_name, method_cfg, ckpt_a, ckpt_b, output, density, seed, log_path):
+def merge_checkpoint(method_name, method_cfg, ckpt_a, ckpt_b, output, density, seed, svd_device, log_path):
     if method_cfg["script"] == "robust":
         cmd = [
             sys.executable,
@@ -152,6 +159,7 @@ def merge_checkpoint(method_name, method_cfg, ckpt_a, ckpt_b, output, density, s
             "--rank-a", "64",
             "--alpha-b", "16",
             "--rank-b", "64",
+            "--svd-device", svd_device,
         ]
     else:
         cmd = [
@@ -173,6 +181,7 @@ def merge_checkpoint(method_name, method_cfg, ckpt_a, ckpt_b, output, density, s
             "--alpha-b", "16",
             "--rank-b", "64",
             "--seed", str(seed),
+            "--svd-device", svd_device,
         ]
     rc, stdout = run(cmd, log_path=log_path)
     if rc != 0:
@@ -290,52 +299,58 @@ def main():
             cfg = METHODS[method]
             record = {"method": method, "started_at": datetime.now().isoformat(), "status": "running"}
             try:
-                gpu = wait_for_gpu(gpu_list, args.idle_mem_mb, args.poll_seconds, output_dir / "gpu_wait_status.txt")
-                cirr_merged = tmp_dir / f"{method}_cirr.pt"
-                merge_checkpoint(
-                    method,
-                    cfg,
-                    cirr_a,
-                    cirr_b,
-                    cirr_merged,
-                    args.density,
-                    args.seed,
-                    output_dir / "logs" / f"{method}_cirr_merge.log",
-                )
-                gpu = wait_for_gpu(gpu_list, args.idle_mem_mb, args.poll_seconds, output_dir / "gpu_wait_status.txt")
-                record["cirr"] = eval_cirr(
-                    cirr_merged,
-                    gpu,
-                    output_dir / "records" / f"{method}_cirr_result.json",
-                    output_dir / "logs" / f"{method}_cirr_eval.log",
-                    args.batch_size,
-                    args.workers,
-                )
-                cirr_merged.unlink(missing_ok=True)
+                if args.eval_scope in {"all", "cirr"}:
+                    gpu = wait_for_gpu(gpu_list, args.idle_mem_mb, args.poll_seconds, output_dir / "gpu_wait_status.txt")
+                    svd_device = f"cuda:{gpu}" if args.merge_on_gpu else "cpu"
+                    cirr_merged = tmp_dir / f"{method}_cirr.pt"
+                    merge_checkpoint(
+                        method,
+                        cfg,
+                        cirr_a,
+                        cirr_b,
+                        cirr_merged,
+                        args.density,
+                        args.seed,
+                        svd_device,
+                        output_dir / "logs" / f"{method}_cirr_merge.log",
+                    )
+                    gpu = wait_for_gpu(gpu_list, args.idle_mem_mb, args.poll_seconds, output_dir / "gpu_wait_status.txt")
+                    record["cirr"] = eval_cirr(
+                        cirr_merged,
+                        gpu,
+                        output_dir / "records" / f"{method}_cirr_result.json",
+                        output_dir / "logs" / f"{method}_cirr_eval.log",
+                        args.batch_size,
+                        args.workers,
+                    )
+                    cirr_merged.unlink(missing_ok=True)
 
-                gpu = wait_for_gpu(gpu_list, args.idle_mem_mb, args.poll_seconds, output_dir / "gpu_wait_status.txt")
-                multi_merged = tmp_dir / f"{method}_multi.pt"
-                merge_checkpoint(
-                    method,
-                    cfg,
-                    multi_a,
-                    multi_b,
-                    multi_merged,
-                    args.density,
-                    args.seed,
-                    output_dir / "logs" / f"{method}_multi_merge.log",
-                )
-                gpu = wait_for_gpu(gpu_list, args.idle_mem_mb, args.poll_seconds, output_dir / "gpu_wait_status.txt")
-                record["multi"] = eval_multi(
-                    multi_merged,
-                    gpu,
-                    output_dir / "records" / f"{method}_multi_result.json",
-                    output_dir / "logs" / f"{method}_multi_eval.log",
-                    args.multi_batch_size,
-                    args.genecis_batch_size,
-                    args.workers,
-                )
-                multi_merged.unlink(missing_ok=True)
+                if args.eval_scope in {"all", "multi"}:
+                    gpu = wait_for_gpu(gpu_list, args.idle_mem_mb, args.poll_seconds, output_dir / "gpu_wait_status.txt")
+                    svd_device = f"cuda:{gpu}" if args.merge_on_gpu else "cpu"
+                    multi_merged = tmp_dir / f"{method}_multi.pt"
+                    merge_checkpoint(
+                        method,
+                        cfg,
+                        multi_a,
+                        multi_b,
+                        multi_merged,
+                        args.density,
+                        args.seed,
+                        svd_device,
+                        output_dir / "logs" / f"{method}_multi_merge.log",
+                    )
+                    gpu = wait_for_gpu(gpu_list, args.idle_mem_mb, args.poll_seconds, output_dir / "gpu_wait_status.txt")
+                    record["multi"] = eval_multi(
+                        multi_merged,
+                        gpu,
+                        output_dir / "records" / f"{method}_multi_result.json",
+                        output_dir / "logs" / f"{method}_multi_eval.log",
+                        args.multi_batch_size,
+                        args.genecis_batch_size,
+                        args.workers,
+                    )
+                    multi_merged.unlink(missing_ok=True)
                 record["status"] = "ok"
             except Exception as exc:
                 record["status"] = "failed"

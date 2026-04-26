@@ -84,8 +84,14 @@ def _valid_copy_pair(pair: Dict[str, torch.Tensor]) -> bool:
    return b.shape[1] == a.shape[0]
 
 
-def _svd_factorize(delta: torch.Tensor, rank: int, out_dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+def _svd_factorize(
+   delta: torch.Tensor,
+   rank: int,
+   out_dtype: torch.dtype,
+   compute_device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
    # delta: [out_dim, in_dim]
+   delta = delta.to(device=compute_device, dtype=torch.float32)
    u, s, vh = torch.linalg.svd(delta, full_matrices=False)
    use_r = min(rank, s.shape[0])
    s_root = torch.sqrt(torch.clamp(s[:use_r], min=0.0))
@@ -99,24 +105,30 @@ def _svd_factorize(delta: torch.Tensor, rank: int, out_dtype: torch.dtype) -> Tu
       a_full[:use_r, :] = a_small
    else:
       b_full, a_full = b_small, a_small
-   return a_full.to(dtype=out_dtype), b_full.to(dtype=out_dtype)
+   return a_full.to(device="cpu", dtype=out_dtype), b_full.to(device="cpu", dtype=out_dtype)
 
 
-def _svd_topk_matrix(mat: torch.Tensor, rank_keep: int, rescale: bool = False) -> torch.Tensor:
+def _svd_topk_matrix(
+   mat: torch.Tensor,
+   rank_keep: int,
+   rescale: bool = False,
+   compute_device: torch.device = torch.device("cpu"),
+) -> torch.Tensor:
    if mat.ndim != 2:
       raise ValueError(f"_svd_topk_matrix expects 2D tensor, got shape={tuple(mat.shape)}")
+   mat = mat.to(device=compute_device, dtype=torch.float32)
    max_rank = min(mat.shape[0], mat.shape[1])
    use_r = max(1, min(int(rank_keep), max_rank))
    if use_r >= max_rank:
-      return mat
+      return mat.to("cpu")
    u, s, vh = torch.linalg.svd(mat, full_matrices=False)
    truncated = (u[:, :use_r] * s[:use_r].unsqueeze(0)) @ vh[:use_r, :]
    if not rescale:
-      return truncated
+      return truncated.to("cpu")
    keep_ratio = float(use_r) / float(max_rank)
    if keep_ratio <= 0.0:
       return truncated
-   return truncated / keep_ratio
+   return (truncated / keep_ratio).to("cpu")
 
 
 def _breadcrumbs_prune(tensor: torch.Tensor, bottom_quantile: float, top_quantile: float) -> torch.Tensor:
@@ -213,8 +225,17 @@ def main() -> None:
       default=False,
       help="When base checkpoint is full, save only the tensors required for eval.",
    )
+   parser.add_argument(
+      "--svd-device",
+      type=str,
+      default="cpu",
+      help="Device used for dense delta merge/SVD, e.g. cpu or cuda:4. No CUDA remapping is applied.",
+   )
    args = parser.parse_args()
    torch.manual_seed(int(args.seed))
+   compute_device = torch.device(args.svd_device)
+   if compute_device.type == "cuda" and not torch.cuda.is_available():
+      raise RuntimeError(f"Requested {args.svd_device}, but CUDA is not available.")
 
    print(f"loading ckpt_a: {args.ckpt_a}", flush=True)
    ckpt_a = _load_checkpoint(args.ckpt_a)
@@ -265,7 +286,7 @@ def main() -> None:
    if abs(base_scale) < 1e-12:
       raise ValueError("Base LoRA scale is zero. Check alpha/rank arguments.")
 
-   w = torch.tensor(args.weights, dtype=torch.float32)
+   w = torch.tensor(args.weights, dtype=torch.float32, device=compute_device)
    merged_AB: Dict[str, torch.Tensor] = {}
    copied_b_only_prefixes = 0
    shared_b_mismatch_prefixes = 0
@@ -276,10 +297,10 @@ def main() -> None:
 
    def _write_shared_b_sum(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor]):
       nonlocal shared_b_mismatch_prefixes
-      aA = pa["A"].float()
-      aB = pa["B"].float()
-      bA = pb["A"].float()
-      bB = pb["B"].float()
+      aA = pa["A"].to(device=compute_device, dtype=torch.float32)
+      aB = pa["B"].to(device=compute_device, dtype=torch.float32)
+      bA = pb["A"].to(device=compute_device, dtype=torch.float32)
+      bB = pb["B"].to(device=compute_device, dtype=torch.float32)
       if aB.shape != bB.shape:
          raise RuntimeError(
             f"Shared-B merge requires matching B shapes for {prefix}: {tuple(aB.shape)} vs {tuple(bB.shape)}"
@@ -297,15 +318,15 @@ def main() -> None:
       else:
          kA = pair_a[prefix].get("A_key", prefix + ".A")
          kB = pair_a[prefix].get("B_key", prefix + ".B")
-      merged_AB[kA] = merged_A.to(dtype=out_dtype)
-      merged_AB[kB] = b_ref.to(dtype=out_dtype)
+      merged_AB[kA] = merged_A.to(device="cpu", dtype=out_dtype)
+      merged_AB[kB] = b_ref.to(device="cpu", dtype=out_dtype)
 
    def _write_shared_b_svd_a(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor]):
       nonlocal shared_b_mismatch_prefixes
-      aA = pa["A"].float()
-      aB = pa["B"].float()
-      bA = pb["A"].float()
-      bB = pb["B"].float()
+      aA = pa["A"].to(device=compute_device, dtype=torch.float32)
+      aB = pa["B"].to(device=compute_device, dtype=torch.float32)
+      bA = pb["A"].to(device=compute_device, dtype=torch.float32)
+      bB = pb["B"].to(device=compute_device, dtype=torch.float32)
       if aB.shape != bB.shape:
          raise RuntimeError(
             f"Shared-B SVD-A merge requires matching B shapes for {prefix}: {tuple(aB.shape)} vs {tuple(bB.shape)}"
@@ -320,6 +341,7 @@ def main() -> None:
          merged_A,
          rank_keep=args.svd_topk_rank,
          rescale=args.svd_rescale,
+         compute_device=compute_device,
       )
       out_dtype = pair_b[prefix]["A"].dtype if args.base == "b" else pair_a[prefix]["A"].dtype
       if args.base == "b":
@@ -328,8 +350,8 @@ def main() -> None:
       else:
          kA = pair_a[prefix].get("A_key", prefix + ".A")
          kB = pair_a[prefix].get("B_key", prefix + ".B")
-      merged_AB[kA] = merged_A.to(dtype=out_dtype)
-      merged_AB[kB] = b_ref.to(dtype=out_dtype)
+      merged_AB[kA] = merged_A.to(device="cpu", dtype=out_dtype)
+      merged_AB[kB] = b_ref.to(device="cpu", dtype=out_dtype)
 
    def _merge_delta_tensors(delta_a_eff: torch.Tensor, delta_b_eff: torch.Tensor, mode: str) -> torch.Tensor:
       if mode == "task_arithmetic":
@@ -365,17 +387,17 @@ def main() -> None:
       )
 
    def _write_delta_merge(prefix: str, pa: Dict[str, torch.Tensor], pb: Dict[str, torch.Tensor], mode: str):
-      aA = pa["A"].float()
-      aB = pa["B"].float()
-      bA = pb["A"].float()
-      bB = pb["B"].float()
+      aA = pa["A"].to(device=compute_device, dtype=torch.float32)
+      aB = pa["B"].to(device=compute_device, dtype=torch.float32)
+      bA = pb["A"].to(device=compute_device, dtype=torch.float32)
+      bB = pb["B"].to(device=compute_device, dtype=torch.float32)
       delta_a_eff = scale_a * (aB @ aA)
       delta_b_eff = scale_b * (bB @ bA)
       delta_m_eff = _merge_delta_tensors(delta_a_eff, delta_b_eff, mode)
       delta_m = delta_m_eff / base_scale
       rank_target = pair_b[prefix]["A"].shape[0] if args.base == "b" else pair_a[prefix]["A"].shape[0]
       out_dtype = pair_b[prefix]["A"].dtype if args.base == "b" else pair_a[prefix]["A"].dtype
-      mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype)
+      mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype, compute_device=compute_device)
       if args.base == "b":
          kA = pair_b[prefix].get("A_key", prefix + ".A")
          kB = pair_b[prefix].get("B_key", prefix + ".B")
@@ -415,15 +437,15 @@ def main() -> None:
          pb = pair_b[p]
          if not _valid_copy_pair(pb):
             continue
-         bA = pb["A"].float()
-         bB = pb["B"].float()
+         bA = pb["A"].to(device=compute_device, dtype=torch.float32)
+         bB = pb["B"].to(device=compute_device, dtype=torch.float32)
          out_dtype = pb["A"].dtype
          kA = pb.get("A_key", p + ".A")
          kB = pb.get("B_key", p + ".B")
          effective_merge_mode = "shared_b_sum_a" if args.merge_mode == "shared_a_sum_b" else args.merge_mode
          if effective_merge_mode == "shared_b_sum_a":
             coeff_b = weight_b * (scale_b / base_scale)
-            merged_AB[kA] = (coeff_b * bA).to(dtype=out_dtype)
+            merged_AB[kA] = (coeff_b * bA).to(device="cpu", dtype=out_dtype)
             merged_AB[kB] = pb["B"].to(dtype=out_dtype)
          elif effective_merge_mode == "shared_b_svd_a":
             coeff_b = weight_b * (scale_b / base_scale)
@@ -431,12 +453,13 @@ def main() -> None:
                coeff_b * bA,
                rank_keep=args.svd_topk_rank,
                rescale=args.svd_rescale,
+               compute_device=compute_device,
             )
             merged_AB[kA] = merged_A.to(dtype=out_dtype)
             merged_AB[kB] = pb["B"].to(dtype=out_dtype)
          elif effective_merge_mode == "hybrid_layerwise" and (_text_resblock_index(p) is not None and _text_resblock_index(p) < int(args.shared_b_num_layers)):
             coeff_b = weight_b * (scale_b / base_scale)
-            merged_AB[kA] = (coeff_b * bA).to(dtype=out_dtype)
+            merged_AB[kA] = (coeff_b * bA).to(device="cpu", dtype=out_dtype)
             merged_AB[kB] = pb["B"].to(dtype=out_dtype)
          elif effective_merge_mode == "hybrid_layerwise_svd_a" and (_text_resblock_index(p) is not None and _text_resblock_index(p) < int(args.shared_b_num_layers)):
             coeff_b = weight_b * (scale_b / base_scale)
@@ -444,6 +467,7 @@ def main() -> None:
                coeff_b * bA,
                rank_keep=args.svd_topk_rank,
                rescale=args.svd_rescale,
+               compute_device=compute_device,
             )
             merged_AB[kA] = merged_A.to(dtype=out_dtype)
             merged_AB[kB] = pb["B"].to(dtype=out_dtype)
@@ -453,7 +477,7 @@ def main() -> None:
             rank_target = pb["A"].shape[0]
             delta_m_eff = _merge_delta_tensors(torch.zeros_like(delta_b_eff), delta_b_eff, effective_merge_mode)
             delta_m = delta_m_eff / base_scale
-            mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype)
+            mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype, compute_device=compute_device)
             merged_AB[kA] = mA
             merged_AB[kB] = mB
          copied_b_only_prefixes += 1
@@ -512,6 +536,7 @@ def main() -> None:
    print(f"seed: {args.seed}")
    print(f"breadcrumbs_bottom_quantile: {args.breadcrumbs_bottom_quantile}")
    print(f"breadcrumbs_top_quantile: {args.breadcrumbs_top_quantile}")
+   print(f"svd_device: {args.svd_device}")
    print(f"shallow_shared_prefixes: {shallow_shared_prefixes}")
    print(f"deep_ties_prefixes: {deep_ties_prefixes}")
    print(f"shared_b_mismatch_prefixes: {shared_b_mismatch_prefixes}")

@@ -58,7 +58,13 @@ def _valid_pair(pair: Dict[str, torch.Tensor]) -> bool:
     return ("A" in pair) and ("B" in pair)
 
 
-def _svd_factorize(delta: torch.Tensor, rank: int, out_dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+def _svd_factorize(
+    delta: torch.Tensor,
+    rank: int,
+    out_dtype: torch.dtype,
+    compute_device: torch.device,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    delta = delta.to(device=compute_device, dtype=torch.float32)
     u, s, vh = torch.linalg.svd(delta, full_matrices=False)
     use_r = min(rank, s.shape[0])
     s_root = torch.sqrt(torch.clamp(s[:use_r], min=0.0))
@@ -72,7 +78,7 @@ def _svd_factorize(delta: torch.Tensor, rank: int, out_dtype: torch.dtype) -> Tu
         a_full[:use_r, :] = a_small
     else:
         b_full, a_full = b_small, a_small
-    return a_full.to(dtype=out_dtype), b_full.to(dtype=out_dtype)
+    return a_full.to(device="cpu", dtype=out_dtype), b_full.to(device="cpu", dtype=out_dtype)
 
 
 def _prune_by_magnitude(tensor: torch.Tensor, density: float) -> torch.Tensor:
@@ -109,7 +115,16 @@ def main() -> None:
     parser.add_argument("--alpha-b", type=float, default=None, help="LoRA alpha for checkpoint B (optional).")
     parser.add_argument("--rank-b", type=int, default=None, help="LoRA rank for checkpoint B (optional).")
     parser.add_argument("--eps", type=float, default=1e-8, help="Numerical epsilon for adaptive scaling.")
+    parser.add_argument(
+        "--svd-device",
+        type=str,
+        default="cpu",
+        help="Device used for dense delta merge/SVD, e.g. cpu or cuda:4. No CUDA remapping is applied.",
+    )
     args = parser.parse_args()
+    compute_device = torch.device(args.svd_device)
+    if compute_device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"Requested {args.svd_device}, but CUDA is not available.")
 
     ckpt_a = _load_checkpoint(args.ckpt_a)
     ckpt_b = _load_checkpoint(args.ckpt_b)
@@ -162,10 +177,10 @@ def main() -> None:
     scale_history_b: List[float] = []
 
     for prefix in valid_prefixes:
-        aA = pair_a[prefix]["A"].float()
-        aB = pair_a[prefix]["B"].float()
-        bA = pair_b[prefix]["A"].float()
-        bB = pair_b[prefix]["B"].float()
+        aA = pair_a[prefix]["A"].to(device=compute_device, dtype=torch.float32)
+        aB = pair_a[prefix]["B"].to(device=compute_device, dtype=torch.float32)
+        bA = pair_b[prefix]["A"].to(device=compute_device, dtype=torch.float32)
+        bB = pair_b[prefix]["B"].to(device=compute_device, dtype=torch.float32)
 
         delta_a_eff = scale_a * (aB @ aA)
         delta_b_eff = scale_b * (bB @ bA)
@@ -186,7 +201,7 @@ def main() -> None:
 
         rank_target = pair_b[prefix]["A"].shape[0] if args.base == "b" else pair_a[prefix]["A"].shape[0]
         out_dtype = pair_b[prefix]["A"].dtype if args.base == "b" else pair_a[prefix]["A"].dtype
-        mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype)
+        mA, mB = _svd_factorize(delta_m, rank=rank_target, out_dtype=out_dtype, compute_device=compute_device)
 
         if args.base == "b":
             key_a = pair_b[prefix].get("A_key", prefix + ".A")
@@ -230,6 +245,7 @@ def main() -> None:
     print(f"scale_a(alpha/r): {scale_a}, scale_b(alpha/r): {scale_b}, base_scale: {base_scale}")
     print(f"norm_scale_a_mean: {sum(scale_history_a) / max(len(scale_history_a), 1):.6f}")
     print(f"norm_scale_b_mean: {sum(scale_history_b) / max(len(scale_history_b), 1):.6f}")
+    print(f"svd_device: {args.svd_device}")
     print(f"scope: {'all_lora' if args.all_lora else ('text_only' if args.text_only else 'default')}")
     print(f"output: {args.output}")
 
