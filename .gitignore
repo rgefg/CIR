@@ -3,3 +3,4 @@ __pycache__/
 *.pyo
 *.so
 .DS_Store
+distillcir_repro/logs/

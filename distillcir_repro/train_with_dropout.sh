@@ -28,13 +28,14 @@ ALPHA_REASON="${ALPHA_REASON:-1.0}"
 BETA_FEATURE="${BETA_FEATURE:-1.0}"
 AMP_INIT_SCALE="${AMP_INIT_SCALE:-1024}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
+LOGS_DIR="${LOGS_DIR:-/data2/mingyu/composed_image_retrieval/logs/distillcir_repro}"
 
 CC3M_JSONL="${CC3M_JSONL:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2__merged_with_cc3m_new.retrieval_clean_v2.jsonl}"
 if [[ -z "${WDS_SHARDS:-}" ]]; then
   WDS_SHARDS='/data2/mingyu/composed_image_retrieval/data/wds_cache/cc3m-train-{0000..0575}.tar'
 fi
 PIC2WORD_CKPT="${PIC2WORD_CKPT:-/data2/mingyu/composed_image_retrieval/checkpoint/pic2word_model.pt}"
-TEACHER_CACHE="${TEACHER_CACHE:-/data2/mingyu/composed_image_retrieval/checkpoint/distillcir_teacher/llava_phi3_mini_cc3m_cache}"
+TEACHER_CACHE="${TEACHER_CACHE:-/data2/mingyu/composed_image_retrieval/checkpoint/distillcir_teacher/llava_phi3_mini_lora_lcom_4x3090_b28_cc3m_cache}"
 
 CONNECTOR="${CONNECTOR:-and}"         # CIRR uses and. CIRCO/FashionIQ use that.
 REASON_CONNECTOR="${REASON_CONNECTOR:-that}"
@@ -53,7 +54,7 @@ python src/validate_distillcir_ready.py \
 
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader
 
-torchrun --standalone --nproc_per_node="$GPUS" src/train_distillcir.py \
+torchrun --standalone --nproc_per_node="$GPUS" -- src/train_distillcir.py \
   --model ViT-L/14 \
   --pic2word-pretrained "$PIC2WORD_CKPT" \
   --img2text-arch im2text \
@@ -82,7 +83,7 @@ torchrun --standalone --nproc_per_node="$GPUS" src/train_distillcir.py \
   --lora-r 64 \
   --lora-alpha 16 \
   --lora-dropout 0.0 \
-  --logs ./logs \
+  --logs "$LOGS_DIR" \
   --name "$RUN_NAME" \
   --log-interval 20 \
   "${PHYSICAL_GPU_ARGS[@]}" \
