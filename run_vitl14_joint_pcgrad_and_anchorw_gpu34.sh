@@ -19,7 +19,17 @@ log() {
 
 gpu_snapshot() {
   log "Physical GPU snapshot:"
-  nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits | tee -a "${MASTER_LOG}"
+  if [[ "${INTERNAL_GPU_SNAPSHOT:-0}" != "1" ]]; then
+    log "Internal nvidia-smi snapshot skipped; verify physical occupancy externally."
+    return 0
+  fi
+  set +e
+  nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv,noheader,nounits 2>&1 | tee -a "${MASTER_LOG}"
+  local rc=${PIPESTATUS[0]}
+  set -e
+  if [[ "${rc}" != "0" ]]; then
+    log "nvidia-smi snapshot failed with rc=${rc}; continuing because this check is non-fatal."
+  fi
 }
 
 parse_cirr_eval() {
@@ -257,6 +267,10 @@ PY
 
 log "Experiment dispatcher started. Physical GPUs requested: ${PHYSICAL_GPUS}"
 gpu_snapshot
+if [[ "${PREFLIGHT_ONLY:-0}" == "1" ]]; then
+  log "PREFLIGHT_ONLY=1, exiting before launching training."
+  exit 0
+fi
 
 run_joint_cirr
 gpu_snapshot
