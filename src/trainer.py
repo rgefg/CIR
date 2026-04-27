@@ -2029,6 +2029,8 @@ def train(
                         log_msg += f"\tz_fwd_rev_cos: {loss_stats['z_fwd_rev_cos']:.4f}"
                     if "geo_conflict_ratio" in loss_stats:
                         log_msg += f"\tgeo_conflict: {loss_stats['geo_conflict_ratio']:.2%}"
+                    if "joint_pcgrad_conflict_ratio" in loss_stats:
+                        log_msg += f"\tjoint_pcgrad_conflict: {loss_stats['joint_pcgrad_conflict_ratio']:.2%}"
                     if "gc_before_mean" in loss_stats:
                         log_msg += f"\tgc_before: {loss_stats['gc_before_mean']:.4f}"
                     if "gc_after_mean" in loss_stats:
