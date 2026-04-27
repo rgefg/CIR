@@ -493,3 +493,38 @@ A second, visually clean backup case is:
   - `merged = 1`
 
 These qualitative cases are consistent with the quantitative oracle-transfer probe: the merged model retains more source-conditioned compositional ability than `Pic2Word`, while still behaving differently from the retrieval branch alone.
+
+## LoRA Merge Method Comparison
+
+Fixed setup:
+
+- Backbone: `ViT-L/14`
+- Checkpoint step: `1400`
+- CIRR checkpoint: `DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTL14_SEARLEPhi_And_NoDrop_SharedB12_NoRev_CIRR_MergeCmp`
+- CIRCO/GeneCIS checkpoint: `DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTL14_SEARLEPhi_That_Drop0p5_SharedB12_NoRev_CIRCO_GeneCIS_MergeCmp`
+- Merge scope: text LoRA only
+- Merge weights: retrieval:geo = `0.5:0.5`
+- Density for pruning-style methods: `0.9`
+
+| Merge method | CIRR R_subset@1 | CIRCO mAP@50 | GeneCIS avg R@1 |
+|---|---:|---:|---:|
+| TIES reference | 63.29 | 26.70 | 16.59 |
+| task arithmetic | 65.22 | 27.07 | 16.67 |
+| magnitude prune | 65.22 | 27.07 | 16.69 |
+| DARE linear | 64.96 | 27.05 | 16.65 |
+| DARE TIES | 63.38 | 26.75 | 16.55 |
+| Breadcrumbs | 64.41 | 27.14 | 16.75 |
+| TIES frequency | 63.45 | 26.86 | 16.41 |
+| RobustMerge-style | 65.20 | 27.06 | 16.70 |
+
+Takeaway:
+
+- No off-the-shelf merge method clearly beats the existing LRDM/shared-B story across all three datasets.
+- Breadcrumbs gives the best `CIRCO mAP@50` and `GeneCIS avg R@1` among these generic methods, but the gain over task arithmetic / magnitude pruning is small.
+- Task arithmetic and magnitude pruning are strongest on `CIRR R_subset@1`, both clearly above the plain TIES reference.
+- DARE-TIES and TIES-frequency do not improve this setup; their results are close to or below the TIES reference on at least one key metric.
+
+Result files:
+
+- CIRR: `logs/lora_merge_methods_20260426_gpu_g4_taskmag`, `logs/lora_merge_methods_20260426_gpu_g5_dare`, `logs/lora_merge_methods_20260426_gpu_g6_breadrobust`, `logs/lora_merge_methods_20260426_gpu_g7_tiesfreq`
+- CIRCO/GeneCIS completed retries: `logs/lora_merge_methods_20260427_gpu1_serial_multi_remaining_retry_bs8`
