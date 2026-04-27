@@ -1266,6 +1266,82 @@ def project_geo_gradients(retrieval_model, geo_text_model):
     }
 
 
+def _iter_text_lora_named_parameters(module):
+    for name, param in module.named_parameters():
+        norm_name = _normalized_lora_name(name)
+        if norm_name.startswith("visual."):
+            continue
+        if not (norm_name.endswith(".A") or norm_name.endswith(".B")):
+            continue
+        if not param.requires_grad:
+            continue
+        yield norm_name, param
+
+
+def _capture_text_lora_grads(module):
+    grads = {}
+    for norm_name, param in _iter_text_lora_named_parameters(module):
+        if param.grad is not None:
+            grads[norm_name] = param.grad.detach().clone()
+    return grads
+
+
+def _accumulate_grad_delta(accumulator, before, after):
+    names = set(before.keys()) | set(after.keys())
+    for name in names:
+        after_grad = after.get(name)
+        before_grad = before.get(name)
+        if after_grad is None:
+            continue
+        if before_grad is None:
+            delta = after_grad
+        else:
+            delta = after_grad - before_grad.to(device=after_grad.device, dtype=after_grad.dtype)
+        if name in accumulator:
+            accumulator[name].add_(delta.to(device=accumulator[name].device, dtype=accumulator[name].dtype))
+        else:
+            accumulator[name] = delta.detach().clone()
+
+
+def project_joint_single_branch_gradients(model, retrieval_grad_parts, geo_grad_parts):
+    """PCGrad for joint-single training where both losses share one text adapter."""
+    matched = 0
+    conflicts = 0
+    projected = 0
+    negative_dot_sum = 0.0
+
+    params = dict(_iter_text_lora_named_parameters(model))
+    for norm_name, param in params.items():
+        retr_grad = retrieval_grad_parts.get(norm_name)
+        geo_grad = geo_grad_parts.get(norm_name)
+        if retr_grad is None or geo_grad is None or param.grad is None:
+            continue
+        retr_grad = retr_grad.to(device=param.grad.device, dtype=param.grad.dtype)
+        geo_grad = geo_grad.to(device=param.grad.device, dtype=param.grad.dtype)
+        matched += 1
+        retr_flat = retr_grad.reshape(-1).float()
+        geo_flat = geo_grad.reshape(-1).float()
+        dot_val = torch.dot(geo_flat, retr_flat)
+        if dot_val < 0:
+            conflicts += 1
+            negative_dot_sum += float(dot_val.detach().item())
+            retr_norm_sq = torch.dot(retr_flat, retr_flat)
+            if retr_norm_sq > 1e-12:
+                scale = (dot_val / retr_norm_sq).to(dtype=param.grad.dtype, device=param.grad.device)
+                geo_grad = geo_grad - (scale * retr_grad)
+                projected += 1
+        param.grad.copy_(retr_grad + geo_grad)
+
+    ratio = float(conflicts) / float(matched) if matched > 0 else 0.0
+    return {
+        "joint_pcgrad_pairs": matched,
+        "joint_pcgrad_conflict_count": conflicts,
+        "joint_pcgrad_projected_count": projected,
+        "joint_pcgrad_conflict_ratio": ratio,
+        "joint_pcgrad_negative_dot_sum": negative_dot_sum,
+    }
+
+
 def _capture_named_grads(module, target_names):
     if not target_names:
         return {}
@@ -1459,6 +1535,8 @@ def train(
 
     # Create iterator once; re-creating iter(dataloader) repeatedly is very expensive (and can stall).
     dl_it = iter(dataloader)
+    joint_pcgrad_retrieval_grads = {}
+    joint_pcgrad_geo_grads = {}
 
     end = time.time()
     last_log_time = end
@@ -1516,6 +1594,12 @@ def train(
             geo_only_branch = bool(getattr(args, "geo_only_branch", False))
             geo_model = g if g is not None else (m if getattr(args, "joint_single_branch", False) else None)
             geo_enabled = (geo_model is not None) and (geo_weight > 0.0)
+            joint_pcgrad_active = bool(
+                geo_enabled
+                and (not geo_only_branch)
+                and getattr(args, "joint_single_branch", False)
+                and getattr(args, "geo_conflict_projection", False)
+            )
 
             if args.precision == "amp":
                 if geo_only_branch:
@@ -1523,6 +1607,7 @@ def train(
                     retrieval_stats, retrieval_aux = {}, {"per_sample_retrieval_loss": None}
                     total_loss = retrieval_loss / float(accum_steps)
                 else:
+                    joint_retrieval_before = _capture_text_lora_grads(m) if joint_pcgrad_active else None
                     with autocast():
                         retrieval_loss, retrieval_stats, retrieval_aux = get_loss_lcom_cc3m(
                             m,
@@ -1535,6 +1620,13 @@ def train(
                         )
                         total_loss = retrieval_loss / float(accum_steps)
                     retrieval_scaler.scale(total_loss).backward()
+                    if joint_pcgrad_active:
+                        joint_retrieval_after = _capture_text_lora_grads(m)
+                        _accumulate_grad_delta(
+                            joint_pcgrad_retrieval_grads,
+                            joint_retrieval_before,
+                            joint_retrieval_after,
+                        )
                 shared_b_saved_grads = None
                 if geo_enabled and shared_b_retrieval_only and shared_b_param_names:
                     shared_b_saved_grads = _capture_named_grads(m, shared_b_param_names)
@@ -1553,6 +1645,7 @@ def train(
                     geo_rev = _select_batch_items(reverse_instructions, geo_indices)
                     with _geo_rng_context(geo_rng_state, enabled=True):
                         with autocast():
+                            joint_geo_before = _capture_text_lora_grads(m) if joint_pcgrad_active else None
                             if geo_tgt:
                                 geo_src_image_tokens = _compute_geo_src_image_tokens(
                                     m,
@@ -1597,6 +1690,13 @@ def train(
                                 else geo_scaler
                             )
                             active_geo_scaler.scale(weighted_geo_loss / float(accum_steps)).backward()
+                            if joint_pcgrad_active:
+                                joint_geo_after = _capture_text_lora_grads(m)
+                                _accumulate_grad_delta(
+                                    joint_pcgrad_geo_grads,
+                                    joint_geo_before,
+                                    joint_geo_after,
+                                )
                             if shared_b_saved_grads is not None:
                                 restored_count = _restore_named_grads(m, shared_b_saved_grads)
                                 if loss_stats is None:
@@ -1614,6 +1714,7 @@ def train(
                     retrieval_loss = _zero_geo_loss(m)
                     retrieval_stats, retrieval_aux = {}, {"per_sample_retrieval_loss": None}
                 else:
+                    joint_retrieval_before = _capture_text_lora_grads(m) if joint_pcgrad_active else None
                     retrieval_loss, retrieval_stats, retrieval_aux = get_loss_lcom_cc3m(
                         m,
                         i2t,
@@ -1624,6 +1725,13 @@ def train(
                         args,
                     )
                     (retrieval_loss / float(accum_steps)).backward()
+                    if joint_pcgrad_active:
+                        joint_retrieval_after = _capture_text_lora_grads(m)
+                        _accumulate_grad_delta(
+                            joint_pcgrad_retrieval_grads,
+                            joint_retrieval_before,
+                            joint_retrieval_after,
+                        )
                 shared_b_saved_grads = None
                 if geo_enabled and shared_b_retrieval_only and shared_b_param_names:
                     shared_b_saved_grads = _capture_named_grads(m, shared_b_param_names)
@@ -1641,6 +1749,7 @@ def train(
                     geo_fwd = _select_batch_items(geo_forward_instructions, geo_indices)
                     geo_rev = _select_batch_items(reverse_instructions, geo_indices)
                     with _geo_rng_context(geo_rng_state, enabled=True):
+                        joint_geo_before = _capture_text_lora_grads(m) if joint_pcgrad_active else None
                         if geo_tgt:
                             geo_src_image_tokens = _compute_geo_src_image_tokens(
                                 m,
@@ -1679,6 +1788,13 @@ def train(
                             geo_aux = {"geo_logits_unit": None}
                         weighted_geo_loss = geo_loss * geo_weight
                         (weighted_geo_loss / float(accum_steps)).backward()
+                        if joint_pcgrad_active:
+                            joint_geo_after = _capture_text_lora_grads(m)
+                            _accumulate_grad_delta(
+                                joint_pcgrad_geo_grads,
+                                joint_geo_before,
+                                joint_geo_after,
+                            )
                         if shared_b_saved_grads is not None:
                             restored_count = _restore_named_grads(m, shared_b_saved_grads)
                             if loss_stats is None:
@@ -1754,6 +1870,21 @@ def train(
             geo_step_ready = geo_optimizer is not None and g is not None
             projection_stats = {}
             probe_metrics = None
+            if (
+                retrieval_step_ready
+                and getattr(args, "joint_single_branch", False)
+                and getattr(args, "geo_conflict_projection", False)
+                and joint_pcgrad_retrieval_grads
+                and joint_pcgrad_geo_grads
+            ):
+                projection_stats = project_joint_single_branch_gradients(
+                    m,
+                    joint_pcgrad_retrieval_grads,
+                    joint_pcgrad_geo_grads,
+                )
+                if loss_stats is None:
+                    loss_stats = {}
+                loss_stats.update(projection_stats)
             if args.precision == "amp":
                 if retrieval_step_ready:
                     retrieval_scaler.unscale_(optimizer)
@@ -1763,7 +1894,7 @@ def train(
                 geo_step_ready
                 and getattr(args, "geo_conflict_projection", False)
             ):
-                projection_stats = project_geo_gradients(m, g)
+                projection_stats.update(project_geo_gradients(m, g))
                 if loss_stats is None:
                     loss_stats = {}
                 loss_stats.update(projection_stats)
@@ -1792,6 +1923,8 @@ def train(
             optimizer.zero_grad(set_to_none=True)
             if geo_optimizer is not None:
                 geo_optimizer.zero_grad(set_to_none=True)
+            joint_pcgrad_retrieval_grads.clear()
+            joint_pcgrad_geo_grads.clear()
 
             conflict_probe_every = int(getattr(args, "conflict_probe_every", 0))
             conflict_probe_start = int(getattr(args, "conflict_probe_start", 0))
