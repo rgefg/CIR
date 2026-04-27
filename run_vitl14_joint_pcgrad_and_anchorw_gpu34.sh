@@ -47,7 +47,7 @@ log_path = pathlib.Path(sys.argv[2])
 out_path = pathlib.Path(sys.argv[3])
 text = log_path.read_text(encoding="utf-8", errors="replace")
 match = re.search(
-    r"Eval composed FeatureR@1: ([0-9.]+), R@5: ([0-9.]+), R@10: ([0-9.]+), R@50: ([0-9.]+), R@100: ([0-9.]+), R_subset@1: ([0-9.]+), R_subset@2: ([0-9.]+), R_subset@3: ([0-9.]+)",
+    r"Eval composed FeatureR@1:\s*([0-9.]+)[,\t ]+R@5:\s*([0-9.]+)[,\t ]+R@10:\s*([0-9.]+)[,\t ]+R@50:\s*([0-9.]+)[,\t ]+R@100:\s*([0-9.]+)[,\t ]+R_subset@1:\s*([0-9.]+)[,\t ]+R_subset@2:\s*([0-9.]+)[,\t ]+R_subset@3:\s*([0-9.]+)",
     text,
 )
 payload = {
@@ -132,84 +132,96 @@ eval_joint_multi() {
 
 run_joint_cirr() {
   local run_name="DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTL14_SEARLEPhi_And_NoDrop_JointSinglePCGrad_CIRR"
+  local run_dir="${ROOT}/logs/${run_name}"
+  local ckpt="${run_dir}/checkpoints/epoch_0_step_1400.pt"
   log "Start joint-single+PCGrad CIRR training on physical GPUs ${PHYSICAL_GPUS}"
-  rm -rf "${ROOT}/logs/${run_name}"
-  MODEL_NAME="ViT-L/14" \
-  OPENAI_PRETRAINED="1" \
-  PIC2WORD_CKPT="" \
-  IMG2TEXT_ARCH="phi" \
-  IMG2TEXT_PRETRAINED="/data2/mingyu/.cache/torch/hub/checkpoints/SEARLE_ViT-L14.pt" \
-  MIDDLE_DIM="3072" \
-  RETRIEVAL_PROMPT_CONNECTOR="and" \
-  TRAIN_CUDA_DEVICES="${PHYSICAL_GPUS}" \
-  DIST_URL="tcp://127.0.0.1:6434" \
-  RUN_NAME="${run_name}" \
-  TRAIN_BATCH_SIZE="56" \
-  TRAIN_ACCUM_STEPS="8" \
-  LR="2e-5" \
-  GEO_LR="2e-5" \
-  INSTRUCTION_DROPOUT_PROB="0.0" \
-  TRAIN_EPOCH_STEPS="1400" \
-  SAVE_STEP_START="1400" \
-  SAVE_STEP_END="1400" \
-  SAVE_STEP_INTERVAL="1400" \
-  SHARED_B_LORA="0" \
-  SHARED_B_RETRIEVAL_ONLY_UPDATE="0" \
-  JOINT_SINGLE_BRANCH="1" \
-  ENABLE_GEO_CONFLICT_PROJECTION="1" \
-  GEO_REVERSE_WEIGHT="0.0" \
-  GEO_ZERO_LOSS_WEIGHT="1.0" \
-  GEO_SRC_ANCHOR_MODE="blend" \
-  GEO_SRC_IMAGE_WEIGHT="0.25" \
-  GEO_SRC_ANCHOR_DETACH="0" \
-  RUN_POSTHOC_MERGED_EVAL="0" \
-  RUN_POSTHOC_SECOND_MERGED_EVAL="0" \
-  RUN_POSTHOC_CIRR_EVAL="0" \
-  MULTIDATASET_EVAL_EVERY="0" \
-  CIRR_VAL_EVAL_EVERY="0" \
-  bash "${ROOT}/train_with_dropout.sh" 2>&1 | tee -a "${MASTER_LOG}"
-  eval_joint_cirr "${ROOT}/logs/${run_name}"
+  if [[ -f "${ckpt}" ]]; then
+    log "Existing CIRR checkpoint found, skip retraining: ${ckpt}"
+  else
+    rm -rf "${run_dir}"
+    MODEL_NAME="ViT-L/14" \
+    OPENAI_PRETRAINED="1" \
+    PIC2WORD_CKPT="" \
+    IMG2TEXT_ARCH="phi" \
+    IMG2TEXT_PRETRAINED="/data2/mingyu/.cache/torch/hub/checkpoints/SEARLE_ViT-L14.pt" \
+    MIDDLE_DIM="3072" \
+    RETRIEVAL_PROMPT_CONNECTOR="and" \
+    TRAIN_CUDA_DEVICES="${PHYSICAL_GPUS}" \
+    DIST_URL="tcp://127.0.0.1:6434" \
+    RUN_NAME="${run_name}" \
+    TRAIN_BATCH_SIZE="56" \
+    TRAIN_ACCUM_STEPS="8" \
+    LR="2e-5" \
+    GEO_LR="2e-5" \
+    INSTRUCTION_DROPOUT_PROB="0.0" \
+    TRAIN_EPOCH_STEPS="1400" \
+    SAVE_STEP_START="1400" \
+    SAVE_STEP_END="1400" \
+    SAVE_STEP_INTERVAL="1400" \
+    SHARED_B_LORA="0" \
+    SHARED_B_RETRIEVAL_ONLY_UPDATE="0" \
+    JOINT_SINGLE_BRANCH="1" \
+    ENABLE_GEO_CONFLICT_PROJECTION="1" \
+    GEO_REVERSE_WEIGHT="0.0" \
+    GEO_ZERO_LOSS_WEIGHT="1.0" \
+    GEO_SRC_ANCHOR_MODE="blend" \
+    GEO_SRC_IMAGE_WEIGHT="0.25" \
+    GEO_SRC_ANCHOR_DETACH="0" \
+    RUN_POSTHOC_MERGED_EVAL="0" \
+    RUN_POSTHOC_SECOND_MERGED_EVAL="0" \
+    RUN_POSTHOC_CIRR_EVAL="0" \
+    MULTIDATASET_EVAL_EVERY="0" \
+    CIRR_VAL_EVAL_EVERY="0" \
+    bash "${ROOT}/train_with_dropout.sh" 2>&1 | tee -a "${MASTER_LOG}"
+  fi
+  eval_joint_cirr "${run_dir}"
 }
 
 run_joint_circo_genecis() {
   local run_name="DistillCIR_ParallelDualLoRA_BS56_Accum8_ViTL14_SEARLEPhi_That_Drop0p5_JointSinglePCGrad_CIRCO_GeneCIS"
+  local run_dir="${ROOT}/logs/${run_name}"
+  local ckpt="${run_dir}/checkpoints/epoch_0_step_1400.pt"
   log "Start joint-single+PCGrad CIRCO/GeneCIS training on physical GPUs ${PHYSICAL_GPUS}"
-  rm -rf "${ROOT}/logs/${run_name}"
-  MODEL_NAME="ViT-L/14" \
-  OPENAI_PRETRAINED="1" \
-  PIC2WORD_CKPT="" \
-  IMG2TEXT_ARCH="phi" \
-  IMG2TEXT_PRETRAINED="/data2/mingyu/.cache/torch/hub/checkpoints/SEARLE_ViT-L14.pt" \
-  MIDDLE_DIM="3072" \
-  RETRIEVAL_PROMPT_CONNECTOR="that" \
-  TRAIN_CUDA_DEVICES="${PHYSICAL_GPUS}" \
-  DIST_URL="tcp://127.0.0.1:6436" \
-  RUN_NAME="${run_name}" \
-  TRAIN_BATCH_SIZE="56" \
-  TRAIN_ACCUM_STEPS="8" \
-  LR="2e-5" \
-  GEO_LR="2e-5" \
-  INSTRUCTION_DROPOUT_PROB="0.5" \
-  TRAIN_EPOCH_STEPS="1400" \
-  SAVE_STEP_START="1400" \
-  SAVE_STEP_END="1400" \
-  SAVE_STEP_INTERVAL="1400" \
-  SHARED_B_LORA="0" \
-  SHARED_B_RETRIEVAL_ONLY_UPDATE="0" \
-  JOINT_SINGLE_BRANCH="1" \
-  ENABLE_GEO_CONFLICT_PROJECTION="1" \
-  GEO_REVERSE_WEIGHT="0.0" \
-  GEO_ZERO_LOSS_WEIGHT="1.0" \
-  GEO_SRC_ANCHOR_MODE="blend" \
-  GEO_SRC_IMAGE_WEIGHT="0.25" \
-  GEO_SRC_ANCHOR_DETACH="0" \
-  RUN_POSTHOC_MERGED_EVAL="0" \
-  RUN_POSTHOC_SECOND_MERGED_EVAL="0" \
-  RUN_POSTHOC_CIRR_EVAL="0" \
-  MULTIDATASET_EVAL_EVERY="0" \
-  CIRR_VAL_EVAL_EVERY="0" \
-  bash "${ROOT}/train_with_dropout.sh" 2>&1 | tee -a "${MASTER_LOG}"
-  eval_joint_multi "${ROOT}/logs/${run_name}"
+  if [[ -f "${ckpt}" ]]; then
+    log "Existing CIRCO/GeneCIS checkpoint found, skip retraining: ${ckpt}"
+  else
+    rm -rf "${run_dir}"
+    MODEL_NAME="ViT-L/14" \
+    OPENAI_PRETRAINED="1" \
+    PIC2WORD_CKPT="" \
+    IMG2TEXT_ARCH="phi" \
+    IMG2TEXT_PRETRAINED="/data2/mingyu/.cache/torch/hub/checkpoints/SEARLE_ViT-L14.pt" \
+    MIDDLE_DIM="3072" \
+    RETRIEVAL_PROMPT_CONNECTOR="that" \
+    TRAIN_CUDA_DEVICES="${PHYSICAL_GPUS}" \
+    DIST_URL="tcp://127.0.0.1:6436" \
+    RUN_NAME="${run_name}" \
+    TRAIN_BATCH_SIZE="56" \
+    TRAIN_ACCUM_STEPS="8" \
+    LR="2e-5" \
+    GEO_LR="2e-5" \
+    INSTRUCTION_DROPOUT_PROB="0.5" \
+    TRAIN_EPOCH_STEPS="1400" \
+    SAVE_STEP_START="1400" \
+    SAVE_STEP_END="1400" \
+    SAVE_STEP_INTERVAL="1400" \
+    SHARED_B_LORA="0" \
+    SHARED_B_RETRIEVAL_ONLY_UPDATE="0" \
+    JOINT_SINGLE_BRANCH="1" \
+    ENABLE_GEO_CONFLICT_PROJECTION="1" \
+    GEO_REVERSE_WEIGHT="0.0" \
+    GEO_ZERO_LOSS_WEIGHT="1.0" \
+    GEO_SRC_ANCHOR_MODE="blend" \
+    GEO_SRC_IMAGE_WEIGHT="0.25" \
+    GEO_SRC_ANCHOR_DETACH="0" \
+    RUN_POSTHOC_MERGED_EVAL="0" \
+    RUN_POSTHOC_SECOND_MERGED_EVAL="0" \
+    RUN_POSTHOC_CIRR_EVAL="0" \
+    MULTIDATASET_EVAL_EVERY="0" \
+    CIRR_VAL_EVAL_EVERY="0" \
+    bash "${ROOT}/train_with_dropout.sh" 2>&1 | tee -a "${MASTER_LOG}"
+  fi
+  eval_joint_multi "${run_dir}"
 }
 
 run_anchor_w_point() {

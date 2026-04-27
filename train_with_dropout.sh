@@ -443,6 +443,8 @@ if [[ "${RUN_POSTHOC_CIRR_EVAL}" == "1" && "${GEO_WEIGHT}" != "0" && "${GEO_WEIG
   WATCHER_PIDS+=("$!")
 fi
 
-for pid in "${WATCHER_PIDS[@]:-}"; do
-  wait "${pid}"
+for pid in "${WATCHER_PIDS[@]}"; do
+  if [[ -n "${pid}" ]]; then
+    wait "${pid}"
+  fi
 done
