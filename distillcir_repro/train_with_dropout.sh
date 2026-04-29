@@ -24,11 +24,17 @@ EPOCHS="${EPOCHS:-2}"
 WDS_EPOCH_STEPS="${WDS_EPOCH_STEPS:-2807}"
 LR="${LR:-2e-5}"
 WARMUP="${WARMUP:-1000}"
+WD="${WD:-0.2}"
 ALPHA_REASON="${ALPHA_REASON:-1.0}"
 BETA_FEATURE="${BETA_FEATURE:-1.0}"
 AMP_INIT_SCALE="${AMP_INIT_SCALE:-1024}"
 GRAD_CLIP_NORM="${GRAD_CLIP_NORM:-1.0}"
 LOGS_DIR="${LOGS_DIR:-/data2/mingyu/composed_image_retrieval/logs/distillcir_repro}"
+WDS_SHUFFLE="${WDS_SHUFFLE:-20000}"
+WDS_SHARDSHUFFLE="${WDS_SHARDSHUFFLE:-1000}"
+RESET_LOGIT_SCALE="${RESET_LOGIT_SCALE:-0}"
+MIN_LOGIT_SCALE="${MIN_LOGIT_SCALE:-0}"
+MAX_LOGIT_SCALE="${MAX_LOGIT_SCALE:-100}"
 
 CC3M_JSONL="${CC3M_JSONL:-/data2/mingyu/composed_image_retrieval/data/cc3m_cir_dataset_cleaned_v1mid_v2__merged_with_cc3m_new.retrieval_clean_v2.jsonl}"
 if [[ -z "${WDS_SHARDS:-}" ]]; then
@@ -54,6 +60,11 @@ python src/validate_distillcir_ready.py \
 
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader
 
+EXTRA_ARGS=()
+if [[ "$RESET_LOGIT_SCALE" == "1" ]]; then
+  EXTRA_ARGS+=(--reset-logit-scale)
+fi
+
 torchrun --standalone --nproc_per_node="$GPUS" -- src/train_distillcir.py \
   --model ViT-L/14 \
   --pic2word-pretrained "$PIC2WORD_CKPT" \
@@ -73,13 +84,17 @@ torchrun --standalone --nproc_per_node="$GPUS" -- src/train_distillcir.py \
   --accum-steps "$ACCUM_STEPS" \
   --epochs "$EPOCHS" \
   --wds-epoch-steps "$WDS_EPOCH_STEPS" \
+  --wds-shuffle "$WDS_SHUFFLE" \
+  --wds-shardshuffle "$WDS_SHARDSHUFFLE" \
   --workers "$WORKERS" \
   --lr "$LR" \
-  --wd 0.2 \
+  --wd "$WD" \
   --warmup "$WARMUP" \
   --precision amp \
   --amp-init-scale "$AMP_INIT_SCALE" \
   --grad-clip-norm "$GRAD_CLIP_NORM" \
+  --min-logit-scale "$MIN_LOGIT_SCALE" \
+  --max-logit-scale "$MAX_LOGIT_SCALE" \
   --lora-r 64 \
   --lora-alpha 16 \
   --lora-dropout 0.0 \
@@ -87,4 +102,5 @@ torchrun --standalone --nproc_per_node="$GPUS" -- src/train_distillcir.py \
   --name "$RUN_NAME" \
   --log-interval 20 \
   "${PHYSICAL_GPU_ARGS[@]}" \
+  "${EXTRA_ARGS[@]}" \
   "$@"

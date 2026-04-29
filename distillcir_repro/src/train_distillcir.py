@@ -426,7 +426,12 @@ def compute_losses(model, img2text, heads, batch, teacher_store, args):
     caption_tokens = tokenize(text_to_str_list(modified_captions), truncate=True).to(device, non_blocking=True)
     caption_features = normalize(base.encode_text(caption_tokens))
 
-    logit_scale = torch.clamp(base.logit_scale.exp(), max=float(args.max_logit_scale)).mean()
+    logit_scale_raw = base.logit_scale.exp()
+    clamp_min = float(getattr(args, "min_logit_scale", 0.0) or 0.0)
+    clamp_max = float(args.max_logit_scale)
+    if clamp_min > 0.0:
+        logit_scale_raw = torch.clamp(logit_scale_raw, min=clamp_min)
+    logit_scale = torch.clamp(logit_scale_raw, max=clamp_max).mean()
     lcom, lcom_stats = contrastive_loss(
         query_features,
         caption_features,
@@ -652,6 +657,8 @@ def parse_args():
     parser.add_argument("--teacher-cache", type=str, default=None)
     parser.add_argument("--teacher-dim", type=int, default=0)
     parser.add_argument("--bidirectional-contrastive", action="store_true", default=False)
+    parser.add_argument("--reset-logit-scale", action="store_true", default=False)
+    parser.add_argument("--min-logit-scale", type=float, default=0.0)
     parser.add_argument("--max-logit-scale", type=float, default=100.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--logs", type=str, default="./logs")
@@ -693,6 +700,12 @@ def main():
             json.dump(jsonable_args(args), handle, indent=2, sort_keys=True)
 
     model, img2text, preprocess_train, _ = build_clip_and_projection(args)
+    if args.reset_logit_scale:
+        with torch.no_grad():
+            model.logit_scale.data.fill_(math.log(1 / 0.07))
+        if is_master():
+            logging.info("Reset logit_scale to CLIP default: log(1/0.07)=%.6f", math.log(1 / 0.07))
+
     teacher_store = None
     teacher_dim = int(args.teacher_dim)
     if float(args.beta_feature) > 0.0:
