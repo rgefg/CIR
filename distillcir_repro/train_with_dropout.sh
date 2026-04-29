@@ -22,6 +22,13 @@ ACCUM_STEPS="${ACCUM_STEPS:-4}"
 WORKERS="${WORKERS:-4}"
 EPOCHS="${EPOCHS:-2}"
 WDS_EPOCH_STEPS="${WDS_EPOCH_STEPS:-2807}"
+MODEL="${MODEL:-ViT-L/14}"
+OPENAI_PRETRAINED="${OPENAI_PRETRAINED:-0}"
+IMG2TEXT_ARCH="${IMG2TEXT_ARCH:-im2text}"
+IMG2TEXT_PRETRAINED="${IMG2TEXT_PRETRAINED:-}"
+MIDDLE_DIM="${MIDDLE_DIM:-512}"
+N_LAYER="${N_LAYER:-2}"
+DROPRATE="${DROPRATE:-0.0}"
 LR="${LR:-2e-5}"
 WARMUP="${WARMUP:-1000}"
 WD="${WD:-0.2}"
@@ -45,7 +52,9 @@ TEACHER_CACHE="${TEACHER_CACHE:-/data2/mingyu/composed_image_retrieval/checkpoin
 
 CONNECTOR="${CONNECTOR:-and}"         # CIRR uses and. CIRCO/FashionIQ use that.
 REASON_CONNECTOR="${REASON_CONNECTOR:-that}"
-RUN_NAME="${RUN_NAME:-DistillCIR_Repro_ViTL14_${CONNECTOR}_8x3090}"
+MODEL_TAG="${MODEL//\//}"
+MODEL_TAG="${MODEL_TAG//-/_}"
+RUN_NAME="${RUN_NAME:-DistillCIR_Repro_${MODEL_TAG}_${CONNECTOR}_8x3090}"
 
 if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   echo "CUDA_VISIBLE_DEVICES is set to '${CUDA_VISIBLE_DEVICES}'. Unset it to avoid physical GPU remapping." >&2
@@ -64,14 +73,21 @@ EXTRA_ARGS=()
 if [[ "$RESET_LOGIT_SCALE" == "1" ]]; then
   EXTRA_ARGS+=(--reset-logit-scale)
 fi
+if [[ "$OPENAI_PRETRAINED" == "1" ]]; then
+  EXTRA_ARGS+=(--openai-pretrained)
+else
+  EXTRA_ARGS+=(--pic2word-pretrained "$PIC2WORD_CKPT")
+fi
+if [[ -n "$IMG2TEXT_PRETRAINED" ]]; then
+  EXTRA_ARGS+=(--img2text-pretrained "$IMG2TEXT_PRETRAINED")
+fi
 
 torchrun --standalone --nproc_per_node="$GPUS" -- src/train_distillcir.py \
-  --model ViT-L/14 \
-  --pic2word-pretrained "$PIC2WORD_CKPT" \
-  --img2text-arch im2text \
-  --middle-dim 512 \
-  --n-layer 2 \
-  --droprate 0.0 \
+  --model "$MODEL" \
+  --img2text-arch "$IMG2TEXT_ARCH" \
+  --middle-dim "$MIDDLE_DIM" \
+  --n-layer "$N_LAYER" \
+  --droprate "$DROPRATE" \
   --cc3m-cir-jsonl "$CC3M_JSONL" \
   --wds-shards "$WDS_SHARDS" \
   --teacher-cache "$TEACHER_CACHE" \
