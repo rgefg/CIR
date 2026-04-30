@@ -535,6 +535,8 @@ def main():
     output_dir = Path(args.output_dir)
     setup_logging(output_dir)
     seed_everything(args.seed, rank_offset=0)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(args.gpu)
     logging.info("Loading checkpoint: %s", args.resume)
 
     model, img2text, preprocess_val = load_model(args)

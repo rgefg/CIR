@@ -1,0 +1,11 @@
+{
+  "checkpoint": "/data2/mingyu/composed_image_retrieval/logs/bestever03nofreeze/epoch_0_step_1400.pt",
+  "probe_batches": 100,
+  "holdout_batches": 40,
+  "gc_macro_mean": 0.40977005288004875,
+  "gc_after_macro_mean": 0.40565025930603343,
+  "gc_bidir_macro_mean": 0.35403942813475925,
+  "I_raw_mean": 4.486367106437683e-06,
+  "I_proj_mean": 6.0837715864181515e-06,
+  "avg_proj_ratio": 0.20590277777777777
+}
